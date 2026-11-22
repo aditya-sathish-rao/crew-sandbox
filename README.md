@@ -110,6 +110,7 @@ $ crew-sandbox check root       # the ruleset, sudoers and the gate directory
 $ crew-sandbox check proxy      # the allowlist names hosts, not addresses
 $ crew-sandbox check model      # the key stays on the host
 $ crew-sandbox check broker     # one repo, one token, revoked at teardown
+$ crew-sandbox check redteam    # the adversary: seven ways out, all must fail
 $ crew-sandbox check all        # every phase in one process
 ```
 
@@ -127,6 +128,14 @@ $ crew-sandbox check all \
 named by `--model-key-env`, and `broker` needs `--app-id` and `--other-repo`. A phase
 whose input is missing fails with the reason instead of passing over an assertion it
 could not make.
+
+`check redteam` runs a script that attacks the boundary the way a prompt-injected agent
+would — host filesystem, credentials, exfiltration, pushes, host services, sudo, planted
+hooks — and reports one line per attempt. The transcript is the evidence, so keep it:
+
+```console
+$ crew-sandbox check redteam --workspace /path/to/repo --redteam-log redteam.log
+```
 
 What is tested without a guest runs in `nix flake check`: the vault chain, the mount
 rendering, the guest configuration, and the proxy's and broker's `--selftest`:

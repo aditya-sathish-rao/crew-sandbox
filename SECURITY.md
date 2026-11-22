@@ -135,6 +135,7 @@ binary, so the gates that run are the gates that were built.
 | 3.7 no host forwarding | `guest` | a guest listener on 0.0.0.0 and on 127.0.0.1 stays off the host |
 | 3.5 broker mints per task | `broker` | a repository outside the allowlist is refused before minting; a minted token sees only its own repository, cannot write the default branch, and stops working after a revoke |
 | the fleet is installed | `toolchain` | `nix` resolves under `/nix/store` and the store verifies |
+| all of the above, adversarially | `redteam` | seven scripted attacks — host filesystem, credentials, exfiltration, pushes, host services, sudo, planted hooks — each blocked with the evidence printed |
 
 `check all` runs every phase in one process, because a boundary that holds in isolation
 can still fail in combination.
@@ -143,6 +144,12 @@ The gate is told the facts it cannot know — the fleet's tools, the model provi
 URL, the App ID, the allowlists — because none of them belongs to this repository. A
 phase whose input is missing fails with the reason instead of passing over an assertion
 it could not make.
+
+`check redteam` is the adversarial half: a script in `verify/redteam/` that assumes the
+boundary is broken and goes looking for the way through. It reports `BLOCKED`, `ESCAPED`
+or `SKIP` per attempt rather than pass/fail, and `--redteam-log FILE` keeps the transcript
+— the evidence an ADR cites. It never prints a secret value, only the name or path where
+one was found.
 
 The proxy and broker each carry a `--selftest` that runs without a VM: seven
 ClientHello parser cases for the proxy, and the signing path for the broker. Those run

@@ -12,6 +12,10 @@ written and reviewed, not where they are read from at run time.
 
 A gate is a test of the boundary, not of the code that implements it. It asks the guest
 to do the forbidden thing and requires it to fail, so a change made by hand on a running
-VM is caught. The phases are `guest`, `root`, `toolchain`, `proxy`, `model` and
-`broker`; `all` runs them in one process, which is where failures that only appear in
-combination show up.
+VM is caught. The phases are `guest`, `root`, `toolchain`, `proxy`, `model`, `broker`
+and `redteam`; `all` runs them in one process, which is where failures that only appear
+in combination show up.
+
+`redteam` is the odd one out: an attacker's script rather than a checklist. It reports
+`BLOCKED`, `ESCAPED` or `SKIP` per attempt and keeps a transcript, which is the part an
+ADR can cite.

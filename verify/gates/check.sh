@@ -26,6 +26,9 @@ model_key_env=${CREW_MODEL_KEY_ENV:-CREW_MODEL_KEY}
 workspace=${CREW_WORKSPACE:-}
 writable=${CREW_WRITABLE:-false}
 expected_tools=${CREW_EXPECTED_TOOLS:-}
+# The adversarial transcript, and the repositories its push attempt aims at.
+redteam_log=${CREW_REDTEAM_LOG:-}
+redteam_repos=${CREW_REDTEAM_REPOS:-}
 app_id=${CREW_APP_ID:-}
 other_repo=${CREW_BROKER_OTHER_REPO:-}
 # Not 3129: the gate controls the key the broker runs with, so it must not share a
@@ -49,13 +52,14 @@ usage: crew-sandbox check <phase>
   proxy      the egress allowlist, through a keyless proxy
   model      the model key stays on the host, through a keyed proxy
   broker     one repo, one token, revocable, and the default branch refuses it
+  redteam    the adversary: seven ways out, all of which must fail
   all        every phase above, in one run
 EOF
 }
 
 phase=${1:-guest}
 case "$phase" in
-  guest | root | toolchain | proxy | model | broker | all) ;;
+  guest | root | toolchain | proxy | model | broker | redteam | all) ;;
   -h | --help)
     usage
     exit 0
@@ -367,29 +371,37 @@ phase_toolchain() {
   return "$rc"
 }
 
+# start_keyless_proxy: bring up a proxy with no model key, so a phase can test the
+# allowlist through the door the guest actually has. Sets proxy_started when this run
+# owns the listener; a proxy the operator already had running is left alone.
+proxy_started=0
+start_keyless_proxy() {
+  if lsof -nP -iTCP:3128 -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "proxy: already listening on 127.0.0.1:3128; using it as it is"
+    proxy_started=0
+    return 0
+  fi
+  echo "proxy: starting one for the duration of this phase"
+  build_proxy_args
+  "$self" "${proxy_args[@]}" --port 3128 >/dev/null 2>&1 &
+  service_pid=$!
+  service_ports+=(3128)
+  proxy_started=1
+  wait_for_proxy 3128
+}
+
 phase_proxy() {
   require_host_tools limactl curl lsof || return 1
   require_vm || return 1
   proxy_selftest || return 1
-  local started=0
-  if lsof -nP -iTCP:3128 -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "proxy: already listening on 127.0.0.1:3128; using it as it is"
-  else
-    echo "proxy: starting one for the duration of this gate"
-    build_proxy_args
-    "$self" "${proxy_args[@]}" --port 3128 >/dev/null 2>&1 &
-    service_pid=$!
-    service_ports+=(3128)
-    started=1
-    wait_for_proxy 3128 || true
-  fi
+  start_keyless_proxy || return 1
   local rc=0
   stage "$self_dir/proxy.sh" crew-proxy-checks.sh || return 1
   printf '\nphase 4: the egress proxy\n'
   limactl shell "$name" -- sudo -n -u agent -H bash "${gate_dir}/crew-proxy-checks.sh" || rc=1
   # Stop the keyless proxy we started, so the next phase can bind 3128 with the
   # key. A proxy the operator already had running is left alone.
-  if [[ "$started" -eq 1 ]]; then stop_service 3128; fi
+  if [[ "$proxy_started" -eq 1 ]]; then stop_service 3128; fi
   return "$rc"
 }
 
@@ -505,6 +517,34 @@ phase_broker() {
   return "$rc"
 }
 
+# phase_redteam: hand the guest an attacker's script instead of a checklist. The
+# transcript is the deliverable — the evidence an ADR cites — so --redteam-log keeps
+# a copy on the host rather than leaving it to scroll past.
+phase_redteam() {
+  require_host_tools limactl tee || return 1
+  require_vm || return 1
+  local rc=0
+  stage "$self_dir/../redteam/redteam.sh" crew-redteam.sh || return 1
+  # The attacks are only worth anything if the guest has the door it normally has.
+  # Without a proxy they would fail because nothing is listening, which says nothing
+  # about the allowlist or about what the guest holds.
+  start_keyless_proxy || return 1
+  printf '\nphase 7: the adversary\n'
+  local run=(
+    limactl shell "$name" -- sudo -n -u agent -H env
+    CREW_WORKSPACE="$workspace" CREW_REDTEAM_REPOS="$redteam_repos"
+    bash "${gate_dir}/crew-redteam.sh"
+  )
+  if [[ -n "$redteam_log" ]]; then
+    "${run[@]}" 2>&1 | tee "$redteam_log" || rc=1
+    printf 'redteam: transcript kept at %s\n' "$redteam_log"
+  else
+    "${run[@]}" || rc=1
+  fi
+  if [[ "$proxy_started" -eq 1 ]]; then stop_service 3128; fi
+  return "$rc"
+}
+
 # Each phase is named literally rather than dispatched through a variable so the
 # linter can see each call, and a typo'd phase name fails here instead of in the
 # guest.
@@ -521,6 +561,7 @@ case "$phase" in
   proxy) phase_proxy || status=1 ;;
   model) phase_model || status=1 ;;
   broker) phase_broker || status=1 ;;
+  redteam) phase_redteam || status=1 ;;
   all)
     phase_guest || status=1
     phase_root || status=1
@@ -528,6 +569,7 @@ case "$phase" in
     phase_proxy || status=1
     phase_model || status=1
     phase_broker || status=1
+    phase_redteam || status=1
     ;;
 esac
 

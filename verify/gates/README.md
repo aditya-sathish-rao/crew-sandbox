@@ -32,6 +32,10 @@ A phase whose input is missing fails with the reason rather than passing over an
 assertion it could not make. `broker-ruleset.json` is the ruleset the broker gate
 expects on the default branch; it is applied by hand, once per repository.
 
+The adversarial run is `crew-sandbox check redteam`, which stages
+[`../redteam/redteam.sh`](../redteam/redteam.sh) instead of a gate. It is a scenario
+rather than an assertion, so it lives beside these rather than among them.
+
 A gate is a test of the boundary, not of the code that implements it. It should fail
 when the boundary is broken even if every unit test passes. Gates assert capabilities —
 what the guest *can* do — so a configuration change that widens access fails them.

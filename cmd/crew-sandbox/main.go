@@ -25,7 +25,7 @@ import (
 	"github.com/aditya-sathish-rao/crew-sandbox/internal/lima"
 	"github.com/aditya-sathish-rao/crew-sandbox/internal/proxy"
 	"github.com/aditya-sathish-rao/crew-sandbox/internal/vault"
-	"github.com/aditya-sathish-rao/crew-sandbox/verify/gates"
+	"github.com/aditya-sathish-rao/crew-sandbox/verify"
 )
 
 const usage = `usage: crew-sandbox <command> [flags] [-- args]
@@ -66,9 +66,11 @@ check flags:
   --app-id ID            GitHub App ID for the broker gate (public config)
   --other-repo OWNER/NAME  repository the App is not installed on, to refuse a token
   --broker-port PORT     port the broker gate starts (default: 3139)
+  --redteam-log FILE     keep the adversarial transcript in this file
+  --redteam-repos LIST   owner/name repositories the red team tries to push to
 
 check phases:
-  guest, root, toolchain, proxy, model, broker, all (default: guest)
+  guest, root, toolchain, proxy, model, broker, redteam, all (default: guest)
 
 The guest sees nothing of the host unless --workspace is given. That is the
 boundary: a workspace mount is the one deliberate exception, and it is read-only
@@ -416,6 +418,8 @@ func cmdCheck(ctx context.Context, args []string) error {
 		brokerPortDefault = 3139
 	}
 	brokerPort := fs.Int("broker-port", brokerPortDefault, "port the broker gate starts")
+	redteamLog := fs.String("redteam-log", envOr("CREW_REDTEAM_LOG", ""), "keep the adversarial transcript in this file")
+	redteamRepos := fs.String("redteam-repos", envOr("CREW_REDTEAM_REPOS", ""), "space-separated owner/name repositories the red team tries to push to")
 	// The phase list is the top-level usage, so -h shows that rather than flag's
 	// own dump of the flags.
 	fs.Usage = func() {}
@@ -443,7 +447,8 @@ func cmdCheck(ctx context.Context, args []string) error {
 		return err
 	}
 	defer os.RemoveAll(dir)
-	if err := stageGates(dir); err != nil {
+	driver, err := verify.Stage(dir)
+	if err != nil {
 		return err
 	}
 
@@ -456,7 +461,7 @@ func cmdCheck(ctx context.Context, args []string) error {
 		return fmt.Errorf("check: cannot locate the crew-sandbox binary: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "bash", filepath.Join(dir, "check.sh"), phase)
+	cmd := exec.CommandContext(ctx, "bash", driver, phase)
 	cmd.Env = append(os.Environ(),
 		"CREW_SELF="+self,
 		"CREW_NAME="+*name,
@@ -470,35 +475,10 @@ func cmdCheck(ctx context.Context, args []string) error {
 		"CREW_APP_ID="+*appID,
 		"CREW_BROKER_OTHER_REPO="+*otherRepo,
 		"CREW_BROKER_PORT="+strconv.Itoa(*brokerPort),
+		"CREW_REDTEAM_LOG="+*redteamLog,
+		"CREW_REDTEAM_REPOS="+*redteamRepos,
 	)
 	return runForeground(cmd)
-}
-
-// stageGates writes the embedded scripts into dir. They are executable only by
-// their owner and live in a private temporary directory, so the guest cannot
-// rewrite what root is about to run.
-func stageGates(dir string) error {
-	entries, err := gates.Scripts.ReadDir(".")
-	if err != nil {
-		return fmt.Errorf("check: %w", err)
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		data, err := gates.Scripts.ReadFile(entry.Name())
-		if err != nil {
-			return fmt.Errorf("check: %w", err)
-		}
-		mode := os.FileMode(0o600)
-		if strings.HasSuffix(entry.Name(), ".sh") {
-			mode = 0o700
-		}
-		if err := os.WriteFile(filepath.Join(dir, entry.Name()), data, mode); err != nil {
-			return fmt.Errorf("check: %w", err)
-		}
-	}
-	return nil
 }
 
 // envOr is the default for a flag whose operator already set the environment.
