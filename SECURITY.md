@@ -115,20 +115,24 @@ reachable from the host as if it were a host service.
 
 ## 4. Verification
 
-Each invariant maps to a gate in `verify/`. The gates are not ported yet; this is
-the mapping they will implement. Until they land, `crew-sandbox check` exits with
-an error rather than reporting a pass.
+The gates are phases in `agentic-dev-env/nix/crew-sandbox/check.sh`, each backed by a
+script in its `checks/` directory. They are not ported to this repository yet, so
+`crew-sandbox check` exits with an error rather than reporting a pass. The table below
+names the phase that proves each invariant, so the port has a target.
 
-| Invariant | Gate | What it asserts |
+| Invariant | Phase | What it asserts |
 | --- | --- | --- |
-| 3.2 no host mount | `verify/gates/fs_boundary` | `/Users` absent; no 9p or virtiofs mount; admin home unreadable by `agent` |
-| 3.3 default-deny egress | `verify/gates/egress` | arbitrary host, arbitrary resolver, and the host on any port but 3128 all fail |
-| 3.3 broker port closed | `verify/gates/egress` | 3129 times out from the guest |
-| 3.4 allowlist names hosts | `verify/gates/proxy` | allowlisted host answers; spoofed `Host` cannot retarget; a tunnel whose SNI names another host is refused; CONNECT on port 80 is refused |
-| 3.5 no credential in the guest | `verify/gates/env_audit` | no secret pattern in the guest's environment or `/proc` |
-| 3.6 reduced privilege | `verify/gates/privilege` | sudo unavailable; ruleset not readable, not flushable, not writable |
-| 3.7 no host forwarding | `verify/gates/fs_boundary` | a guest listener on 0.0.0.0 and on 127.0.0.1 stays off the host |
-| 3.4/3.5 end to end | `verify/redteam/exfil_sim` | a simulated injection cannot reach an off-list host or read a credential |
+| 3.2 no host mount | `box` | `/Users` absent; no 9p or virtiofs mount; admin home unreadable by `agent` |
+| 3.3 default-deny egress | `box` | arbitrary host, arbitrary resolver, and the host on any port but 3128 all fail |
+| 3.3 broker port closed | `box` | the token broker is not reachable from the guest |
+| 3.4 allowlist names hosts | `proxy` | allowlisted host answers; a host off the allowlist is refused over https and http; a spoofed `Host` cannot retarget a plain-HTTP request; a tunnel whose SNI names another host is refused; CONNECT is refused on port 80 |
+| 3.5 no credential in the guest | `model` | no environment value is the model key; the gateway token is not a model key |
+| 3.6 reduced privilege | `box` | sudo unavailable; ruleset not readable, not flushable, not writable; `agent` in no privileged group |
+| 3.7 no host forwarding | `box` | a guest listener on 0.0.0.0 and on 127.0.0.1 stays off the host |
+| 3.5 broker mints per task | `broker` | a repository outside the allowlist is refused before minting; a minted token sees only its own repository |
+
+`check all` runs every phase in one process, because a boundary that holds in
+isolation can still fail in combination.
 
 The proxy and broker each carry a `--selftest` that runs without a VM: seven
 ClientHello parser cases for the proxy, and the signing path for the broker. Those

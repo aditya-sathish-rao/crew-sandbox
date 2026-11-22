@@ -1,12 +1,13 @@
 # `verify/redteam/`
 
-Adversarial simulations. Each script plays the part of a compromised agent and tries to
-escape the boundary the way a prompt injection would.
+Adversarial simulations: scripts that try to escape the boundary the way a
+prompt-injected agent would.
 
-- `exfil_sim` — attempts to reach an off-list host, read a credential from the
-  environment or `/proc`, and reach the broker port. Every attempt must fail.
+Nothing is here yet. The original system had no red-team scripts either — its
+adversarial cases live inside the phase gates, as assertions that an attack fails. For
+example `proxy.sh` asserts that a spoofed `Host` header cannot retarget a plain-HTTP
+request and that a tunnel whose SNI names another host is refused. Those are attacks,
+written as gates.
 
-A red-team script is expected to fail closed: if the attack succeeds, the script exits
-non-zero. These are the tests that catch a boundary that looks correct and leaks.
-
-None of these are ported yet.
+A red-team script belongs here when an attack needs more than one assertion to describe,
+or when it needs to run against a deliberately broken build to prove the gate catches it.
