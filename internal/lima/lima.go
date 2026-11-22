@@ -12,6 +12,7 @@ package lima
 import (
 	"bytes"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -100,32 +101,90 @@ var ErrMountsNotApplied = errors.New("mounts cannot be added to an existing inst
 // starting a running instance is a no-op.
 //
 // A mount is only honoured when the instance is created. If mounts were requested
-// and the instance already exists, Start refuses rather than running the command
-// without the workspace.
+// and the existing instance does not already have them, Start refuses rather than
+// running the command without the workspace. An instance that already carries the
+// requested mount is fine: the second and later runs of the same workspace must
+// work, not fail.
 func (g Guest) Start() error {
 	status, err := g.Status()
 	if err != nil {
 		return err
 	}
-	if status == StatusRunning {
-		if len(g.Mounts) > 0 {
-			return fmt.Errorf("%w: %s is already running without them; destroy it first", ErrMountsNotApplied, g.Name)
-		}
-		return nil
+	if status == StatusUnknown {
+		return g.create()
 	}
-	if status == StatusStopped {
-		if len(g.Mounts) > 0 {
-			return fmt.Errorf("%w: %s already exists without them; destroy it first", ErrMountsNotApplied, g.Name)
-		}
-		_, err := g.run("start", "--tty=false", g.Name)
+
+	applied, err := g.appliedMounts()
+	if err != nil {
 		return err
 	}
-	return g.create()
+	if !mountsSatisfied(g.Mounts, applied) {
+		return fmt.Errorf("%w: %s already exists without them; destroy it first", ErrMountsNotApplied, g.Name)
+	}
+	if status == StatusRunning {
+		return nil
+	}
+	_, err = g.run("start", "--tty=false", g.Name)
+	return err
+}
+
+// appliedMounts reads the mounts an existing instance was created with. Lima
+// records them in the instance's own lima.yaml, which is the authoritative copy:
+// the definition the operator passed is not what the instance is running.
+func (g Guest) appliedMounts() ([]Mount, error) {
+	out, err := g.run("list", g.Name, "--json")
+	if err != nil {
+		return nil, err
+	}
+	var info struct {
+		Config struct {
+			Mounts []struct {
+				Location   string `json:"location"`
+				MountPoint string `json:"mountPoint"`
+				Writable   bool   `json:"writable"`
+			} `json:"mounts"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("limactl list %s --json: %w", g.Name, err)
+	}
+	mounts := make([]Mount, 0, len(info.Config.Mounts))
+	for _, m := range info.Config.Mounts {
+		mounts = append(mounts, Mount{
+			Location:   m.Location,
+			MountPoint: m.MountPoint,
+			Writable:   m.Writable,
+		})
+	}
+	return mounts, nil
+}
+
+// mountsSatisfied reports whether every requested mount is already present with
+// the same location, mount point and writability. A read-only request is not
+// satisfied by a writable mount: the guest would have more access than asked for.
+func mountsSatisfied(want, have []Mount) bool {
+	for _, w := range want {
+		found := false
+		for _, h := range have {
+			if h.Location == w.Location && h.MountPoint == w.MountPoint && h.Writable == w.Writable {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // create writes the definition to a temporary file and creates the instance from
 // it. The mount overrides are applied with --set so the embedded definition keeps
 // its "mount nothing" default and the mount is visibly a per-run decision.
+//
+// `limactl create` only creates; it leaves the instance stopped. Start is called
+// afterwards so a first run actually runs the command instead of failing with
+// "instance is stopped".
 func (g Guest) create() error {
 	dir, err := os.MkdirTemp("", "crew-sandbox-")
 	if err != nil {
@@ -144,7 +203,10 @@ func (g Guest) create() error {
 	}
 	args = append(args, path)
 
-	_, err = g.run(args...)
+	if _, err = g.run(args...); err != nil {
+		return err
+	}
+	_, err = g.run("start", "--tty=false", g.Name)
 	return err
 }
 
