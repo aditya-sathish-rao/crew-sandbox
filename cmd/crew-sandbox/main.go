@@ -17,12 +17,15 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/aditya-sathish-rao/crew-sandbox/internal/broker"
 	"github.com/aditya-sathish-rao/crew-sandbox/internal/lima"
 	"github.com/aditya-sathish-rao/crew-sandbox/internal/proxy"
 	"github.com/aditya-sathish-rao/crew-sandbox/internal/vault"
+	"github.com/aditya-sathish-rao/crew-sandbox/verify/gates"
 )
 
 const usage = `usage: crew-sandbox <command> [flags] [-- args]
@@ -50,6 +53,22 @@ proxy flags:
 
 broker flags:
   --repos-allow FILE     repository allowlist; empty uses the embedded example
+
+check flags:
+  --name NAME            Lima instance name (default: crew-sandbox)
+  --workspace DIR        the host directory the guest already mounts, if any
+  --writable             that mount is read-write rather than read-only
+  --egress-allow FILE    hostname allowlist the proxy gate enforces
+  --repos-allow FILE     repository allowlist the broker gate mints against
+  --expected-tools LIST  space-separated tools the toolchain gate must find
+  --model-upstream URL   model provider base URL the gateway forwards to
+  --model-key-env NAME   vault secret holding the model key (default: CREW_MODEL_KEY)
+  --app-id ID            GitHub App ID for the broker gate (public config)
+  --other-repo OWNER/NAME  repository the App is not installed on, to refuse a token
+  --broker-port PORT     port the broker gate starts (default: 3139)
+
+check phases:
+  guest, root, toolchain, proxy, model, broker, all (default: guest)
 
 The guest sees nothing of the host unless --workspace is given. That is the
 boundary: a workspace mount is the one deliberate exception, and it is read-only
@@ -312,6 +331,7 @@ func cmdProxy(ctx context.Context, args []string) error {
 	providerName := fs.String("model-provider", "model", "provider label used in logs")
 	upstream := fs.String("model-upstream", "", "model provider base URL; empty disables the gateway")
 	keyEnv := fs.String("model-key-env", "CREW_MODEL_KEY", "vault secret name holding the model key")
+	keyHashOut := fs.String("key-hash-out", "", "write the model key's SHA-256 to this file, for the model gate")
 	egressAllow := fs.String("egress-allow", "", "hostname allowlist file; empty uses the embedded example")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -329,7 +349,8 @@ func cmdProxy(ctx context.Context, args []string) error {
 			Name:     *providerName,
 			Upstream: *upstream,
 		},
-		Port: *port,
+		Port:        *port,
+		KeyHashPath: *keyHashOut,
 	}
 	if *egressAllow != "" {
 		allow, err := os.ReadFile(*egressAllow)
@@ -370,10 +391,124 @@ func cmdProxy(ctx context.Context, args []string) error {
 	return runForeground(p.Cmd)
 }
 
-// cmdCheck runs the verification gates. The gates are not ported yet, so this
-// reports that plainly rather than pretending to pass.
+// cmdCheck runs the verification gates. The gates are bash, because they drive
+// limactl and assert on a guest as it is right now; this command is the seam that
+// puts them where bash can reach them and names the binary that starts the host
+// services they need.
+//
+// The gate set is embedded, so the gates that run are the gates this binary was
+// built with. A phase that cannot be run — no upstream configured, no App ID — says
+// so and fails, rather than reporting a pass it did not earn.
 func cmdCheck(ctx context.Context, args []string) error {
-	return errors.New("check: the verification gates are not ported yet")
+	fs := flag.NewFlagSet("check", flag.ContinueOnError)
+	name := fs.String("name", "crew-sandbox", "Lima instance name")
+	workspace := fs.String("workspace", envOr("CREW_WORKSPACE", ""), "host directory the guest mounts, if any")
+	writable := fs.Bool("writable", os.Getenv("CREW_WRITABLE") == "true", "the workspace mount is read-write")
+	egressAllow := fs.String("egress-allow", envOr("CREW_EGRESS_ALLOW", ""), "hostname allowlist the proxy gate enforces")
+	reposAllow := fs.String("repos-allow", envOr("CREW_REPOS_ALLOW", ""), "repository allowlist the broker gate mints against")
+	expectedTools := fs.String("expected-tools", envOr("CREW_EXPECTED_TOOLS", ""), "space-separated tools the toolchain gate must find")
+	modelUpstream := fs.String("model-upstream", envOr("CREW_MODEL_UPSTREAM", ""), "model provider base URL the gateway forwards to")
+	modelKeyEnv := fs.String("model-key-env", envOr("CREW_MODEL_KEY_ENV", "CREW_MODEL_KEY"), "vault secret holding the model key")
+	appID := fs.String("app-id", envOr("CREW_APP_ID", ""), "GitHub App ID for the broker gate")
+	otherRepo := fs.String("other-repo", envOr("CREW_BROKER_OTHER_REPO", ""), "repository the App is not installed on")
+	brokerPortDefault, _ := strconv.Atoi(os.Getenv("CREW_BROKER_PORT"))
+	if brokerPortDefault == 0 {
+		brokerPortDefault = 3139
+	}
+	brokerPort := fs.Int("broker-port", brokerPortDefault, "port the broker gate starts")
+	// The phase list is the top-level usage, so -h shows that rather than flag's
+	// own dump of the flags.
+	fs.Usage = func() {}
+	// The phase may come before or after the flags: "check guest --workspace DIR"
+	// reads the way an operator types it, and flag.Parse stops at the first
+	// positional argument.
+	phase := "guest"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		phase = args[0]
+		args = args[1:]
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(os.Stdout, usage)
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("check: unexpected argument %q", fs.Arg(0))
+	}
+
+	dir, err := os.MkdirTemp("", "crew-gates-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	if err := stageGates(dir); err != nil {
+		return err
+	}
+
+	// The gates start the proxy and the broker through this binary, so they need
+	// the path that was invoked. Under the packaged wrapper that path is the
+	// wrapper, which is what puts limactl and node on PATH for the child;
+	// os.Executable would name the unwrapped binary and lose them.
+	self, err := exec.LookPath(os.Args[0])
+	if err != nil {
+		return fmt.Errorf("check: cannot locate the crew-sandbox binary: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, "bash", filepath.Join(dir, "check.sh"), phase)
+	cmd.Env = append(os.Environ(),
+		"CREW_SELF="+self,
+		"CREW_NAME="+*name,
+		"CREW_WORKSPACE="+*workspace,
+		"CREW_WRITABLE="+strconv.FormatBool(*writable),
+		"CREW_EGRESS_ALLOW="+*egressAllow,
+		"CREW_REPOS_ALLOW="+*reposAllow,
+		"CREW_EXPECTED_TOOLS="+*expectedTools,
+		"CREW_MODEL_UPSTREAM="+*modelUpstream,
+		"CREW_MODEL_KEY_ENV="+*modelKeyEnv,
+		"CREW_APP_ID="+*appID,
+		"CREW_BROKER_OTHER_REPO="+*otherRepo,
+		"CREW_BROKER_PORT="+strconv.Itoa(*brokerPort),
+	)
+	return runForeground(cmd)
+}
+
+// stageGates writes the embedded scripts into dir. They are executable only by
+// their owner and live in a private temporary directory, so the guest cannot
+// rewrite what root is about to run.
+func stageGates(dir string) error {
+	entries, err := gates.Scripts.ReadDir(".")
+	if err != nil {
+		return fmt.Errorf("check: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		data, err := gates.Scripts.ReadFile(entry.Name())
+		if err != nil {
+			return fmt.Errorf("check: %w", err)
+		}
+		mode := os.FileMode(0o600)
+		if strings.HasSuffix(entry.Name(), ".sh") {
+			mode = 0o700
+		}
+		if err := os.WriteFile(filepath.Join(dir, entry.Name()), data, mode); err != nil {
+			return fmt.Errorf("check: %w", err)
+		}
+	}
+	return nil
+}
+
+// envOr is the default for a flag whose operator already set the environment.
+// The gates take policy as environment variables, so exporting one has to mean the
+// same as passing the flag.
+func envOr(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
 }
 
 // secret resolves a name through the vault chain. The environment is checked

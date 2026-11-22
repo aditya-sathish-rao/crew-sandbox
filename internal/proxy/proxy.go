@@ -52,6 +52,10 @@ type Config struct {
 	ModelToken string
 	// Port is the listen port. Zero means 3128.
 	Port int
+	// KeyHashPath, when set, receives the SHA-256 of the model key. The model gate
+	// compares that fingerprint against every value in the guest's environment, so
+	// it can prove the key is absent without the key ever reaching the guest.
+	KeyHashPath string
 	// Node is the node binary. Empty means "node" from PATH.
 	Node string
 }
@@ -109,6 +113,9 @@ func Command(ctx context.Context, cfg Config) (*Process, error) {
 	}
 	if cfg.Provider.Name != "" {
 		args = append(args, "--model-name", cfg.Provider.Name)
+	}
+	if cfg.KeyHashPath != "" {
+		args = append(args, "--key-hash-out", cfg.KeyHashPath)
 	}
 
 	cmd := exec.CommandContext(ctx, node, args...)

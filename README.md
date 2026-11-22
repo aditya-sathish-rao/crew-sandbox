@@ -9,10 +9,10 @@ This repository is the tool extracted from
 `nix/crew-sandbox/`. It is meant to be consumed there as a Nix flake input, so the sandbox can
 be versioned, reviewed and tested on its own.
 
-**Status: core and guest config ported.** The CLI, the VM definition, the token broker, the
-egress proxy and the guest's home-manager configuration are here and tested. The verification
-gates are not ported yet, so `crew-sandbox check` reports that plainly rather than pretending
-to pass.
+**Status: core, guest config and gates ported.** The CLI, the VM definition, the token broker,
+the egress proxy, the guest's home-manager configuration and the phase gates are here. The
+gates need a running guest and the operator's secrets; a phase whose inputs are missing fails
+with the reason rather than reporting a pass.
 
 ## Why the boundary exists
 
@@ -47,7 +47,7 @@ Concretely, the boundary is four things:
 | `nix/modules/`   | Nix modules exported to consumers, including `darwinModules.default`.           |
 | `nix/packages/`  | The host package set the CLI and the darwin module depend on.                   |
 | `nix/guest/`     | The guest's home-manager configuration, exported as `homeManagerModules`.       |
-| `verify/gates/`  | One script per invariant in [SECURITY.md](SECURITY.md).                         |
+| `verify/gates/`  | One script per invariant in [SECURITY.md](SECURITY.md), run by `check`.         |
 | `verify/redteam/`| Adversarial simulations that try to break those invariants.                     |
 | `examples/`      | Minimal consumer flakes showing how to import this repo.                        |
 
@@ -93,18 +93,43 @@ $ nix flake check         # runs the unit tests and evaluates the guest configur
 $ nix fmt                 # format the Nix sources
 ```
 
-The CLI needs `limactl` and `node` on PATH; the packaged binary wraps both. Running it from
-`nix develop` gives you the same tools without the wrapper.
+The CLI needs `limactl` and `node`, and the gates need `curl`, `jq` and coreutils; the
+packaged binary wraps all of them. Running it from `nix develop` gives you the same tools
+without the wrapper.
 
 ## Verification
 
-`verify/` holds the gates. Each gate is a script that takes a phase and runs named assertions,
-one line per assertion, exiting non-zero on any failure. Phases add assertions; none are
-removed. The gates are not ported yet, so `crew-sandbox check` exits with an error saying so.
+`verify/` holds the gates. Each is a script that runs named assertions, one line per
+assertion, exiting non-zero on any failure. `crew-sandbox check <phase>` runs them, and
+the scripts are embedded in the binary so the gates that run are the gates that were
+built:
 
-What is tested today is the part that does not need a guest: the vault provider chain and the
-mount rendering, run by `nix flake check`. The broker and proxy each carry a `--selftest` that
-exercises their parsing logic without a network or a VM:
+```console
+$ crew-sandbox check guest      # no mount, no sudo, default-deny egress, no host forward
+$ crew-sandbox check root       # the ruleset, sudoers and the gate directory
+$ crew-sandbox check proxy      # the allowlist names hosts, not addresses
+$ crew-sandbox check model      # the key stays on the host
+$ crew-sandbox check broker     # one repo, one token, revoked at teardown
+$ crew-sandbox check all        # every phase in one process
+```
+
+The gate is told what it cannot know, because none of it belongs to this repository:
+
+```console
+$ crew-sandbox check all \
+    --expected-tools "pi gh" \
+    --model-upstream https://api.example.com/v1 \
+    --app-id 123456 \
+    --other-repo owner/elsewhere
+```
+
+`toolchain` needs `--expected-tools`, `model` needs `--model-upstream` and a vault secret
+named by `--model-key-env`, and `broker` needs `--app-id` and `--other-repo`. A phase
+whose input is missing fails with the reason instead of passing over an assertion it
+could not make.
+
+What is tested without a guest runs in `nix flake check`: the vault chain, the mount
+rendering, the guest configuration, and the proxy's and broker's `--selftest`:
 
 ```console
 $ crew-sandbox proxy --selftest    # 7 ClientHello parser cases

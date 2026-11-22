@@ -4,6 +4,9 @@
   buildGoModule,
   lima,
   nodejs,
+  curl,
+  jq,
+  coreutils,
   makeWrapper,
 }:
 buildGoModule {
@@ -18,6 +21,11 @@ buildGoModule {
   # limactl and node are runtime dependencies: the CLI shells out to both. Wrapping
   # them onto PATH keeps the binary honest without baking absolute store paths into
   # the Go source.
+  #
+  # curl, jq and coreutils are for the verification gates, which are bash scripts
+  # this binary carries: they probe the running guest and the host services, so they
+  # need the same tools on the operator's PATH that they would have had as a
+  # separate package.
   nativeBuildInputs = [ makeWrapper ];
 
   postInstall = ''
@@ -26,6 +34,9 @@ buildGoModule {
         lib.makeBinPath [
           lima
           nodejs
+          curl
+          jq
+          coreutils
         ]
       }
   '';

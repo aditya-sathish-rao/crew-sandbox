@@ -38,6 +38,7 @@
       checks = forAllSystems (pkgs: {
         unit = pkgs.callPackage ./nix/checks/unit.nix { };
         guest = pkgs.callPackage ./nix/checks/guest.nix { inherit nixpkgs home-manager; };
+        gates = pkgs.callPackage ./nix/checks/gates.nix { };
       });
 
       devShells = forAllSystems (pkgs: {
@@ -49,6 +50,7 @@
             lima
             nixfmt
             nodejs
+            shellcheck
           ];
         };
       });
