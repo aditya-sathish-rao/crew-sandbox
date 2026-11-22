@@ -9,7 +9,7 @@ point for the invariants in [SECURITY.md](../SECURITY.md).
 | `vault/` | The secret provider interface. Atomic Vault is the default backend; `Static` and `FromEnv` exist for tests and for operators who export secrets. |
 | `broker/` | The GitHub token broker. Wraps the ported `broker.mjs` and supplies its key from a provider. |
 | `proxy/` | The egress proxy and model gateway. Wraps the ported `proxy.mjs` and supplies its allowlist and key. |
-| `allowlist/` | The egress and repo allowlists as data. |
+| `allowlist/` | The egress and repo allowlists, embedded. The only copy of either file. |
 
 The `.mjs` files are ported verbatim from `agentic-dev-env/nix/crew-sandbox/`. They are
 embedded in the Go binary, so a built binary cannot be pointed at a different script by

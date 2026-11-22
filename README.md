@@ -30,7 +30,7 @@ Concretely, the boundary is four things:
   the guest. A workspace mount is opt-in per run and read-only unless `--writable` is passed.
 - **An nftables default-deny.** All input and output is dropped except loopback and the proxy
   port on the host gateway. The broker's port is deliberately not opened.
-- **A host proxy that names hosts.** It admits only the hostnames in `egress-allow`, and it
+- **A host proxy that names hosts.** It admits only the hostnames in `internal/allowlist/egress-allow`, and it
   reads the TLS handshake so an allowlisted CDN address cannot reach another site behind it.
 - **A host broker that holds the key.** GitHub tokens are minted per task and never handed to
   the guest as a long-lived credential.

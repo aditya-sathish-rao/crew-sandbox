@@ -1,8 +1,0 @@
-# Repositories the broker may mint a task token for, one per line.
-#
-# The App installation is the hard limit: a token for a repo outside it is refused
-# by GitHub. This file is the policy on top, so a task cannot ask for a different
-# project than the one it is working on. Add a line when you start a new project,
-# and install the App on that repo too.
-
-crew-broker

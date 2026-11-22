@@ -74,7 +74,7 @@ root-owned and not writable by `agent`.
 ### 3.4 The proxy is the only way out, and it names hosts
 
 The host-side proxy is a CONNECT proxy on 127.0.0.1:3128. It admits only the
-hostnames in `egress-allow`, and only on ports 443 and 80. Two properties make the
+hostnames in `internal/allowlist/egress-allow`, and only on ports 443 and 80. Two properties make the
 allowlist mean what it says:
 
 - **Plain HTTP:** the guest's `Host` header is discarded and set from the

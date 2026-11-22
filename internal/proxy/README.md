@@ -4,6 +4,7 @@ The guest's only door out. A CONNECT proxy that refuses every destination the al
 does not name, plus a model gateway that holds the real key so the guest never does.
 
 `proxy.mjs` is ported verbatim from `agentic-dev-env`. The Go layer supplies the allowlist
+from `internal/allowlist`
 and the model key from a vault provider. The key is optional: without it the gateway is
 disabled and egress enforcement still runs.
 

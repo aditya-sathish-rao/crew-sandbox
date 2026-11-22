@@ -10,25 +10,24 @@ package proxy
 import (
 	"context"
 	_ "embed"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+
+	"github.com/aditya-sathish-rao/crew-sandbox/internal/allowlist"
 )
 
 //go:embed proxy.mjs
 var script []byte
 
-//go:embed egress-allow
-var defaultAllow []byte
-
 // Config is everything the proxy needs to start. The model key is resolved by the
 // caller through a vault.Provider and passed in; this package never reads a vault
 // itself.
 type Config struct {
-	// Allow is the egress allowlist. Empty means the embedded default.
+	// Allow is the egress allowlist. Empty means the embedded default in
+	// internal/allowlist.
 	Allow []byte
 	// ModelKey is the upstream model API key. Empty disables the model gateway,
 	// which is the safe default: a proxy without a key still enforces egress.
@@ -68,7 +67,13 @@ func Command(ctx context.Context, cfg Config) (*Process, error) {
 
 	allow := cfg.Allow
 	if len(allow) == 0 {
-		allow = defaultAllow
+		allow = allowlist.Egress
+	}
+	// An empty allowlist would start a proxy that refuses every request, which
+	// reads as a broken proxy rather than a missing policy. Refuse to start.
+	if _, err := allowlist.Validate(allow); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("proxy: %w", err)
 	}
 	allowPath := filepath.Join(dir, "egress-allow")
 	if err := os.WriteFile(allowPath, allow, 0o600); err != nil {
@@ -114,8 +119,3 @@ func SelfTest(ctx context.Context, cfg Config) error {
 	}
 	return nil
 }
-
-// ErrNoAllowlist is returned when the allowlist is empty. An empty allowlist would
-// deny everything, which is safe but almost never what the operator meant, so it
-// is reported as a configuration error instead.
-var ErrNoAllowlist = errors.New("proxy: allowlist is empty")

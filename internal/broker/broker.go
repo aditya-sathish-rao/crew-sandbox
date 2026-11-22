@@ -17,13 +17,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+
+	"github.com/aditya-sathish-rao/crew-sandbox/internal/allowlist"
 )
 
 //go:embed broker.mjs
 var script []byte
-
-//go:embed repos-allow
-var defaultRepos []byte
 
 // Config is everything the broker needs to start. The secret is resolved by the
 // caller through a vault.Provider and passed in; this package never reads a vault
@@ -35,7 +34,7 @@ type Config struct {
 	// passed through the environment, never argv.
 	PrivateKey string
 	// Repos is the allowlist of repositories a token may be minted for. Empty
-	// means the embedded default.
+	// means the embedded default in internal/allowlist.
 	Repos []byte
 	// Port is the listen port. Zero means 3129.
 	Port int
@@ -82,7 +81,13 @@ func Command(ctx context.Context, cfg Config) (*Process, error) {
 
 	repos := cfg.Repos
 	if len(repos) == 0 {
-		repos = defaultRepos
+		repos = allowlist.Repos
+	}
+	// An empty allowlist would let the broker start and then refuse every mint,
+	// which reads as a broken broker rather than a missing policy. Refuse to start.
+	if _, err := allowlist.Validate(repos); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("broker: %w", err)
 	}
 	reposPath := filepath.Join(dir, "repos-allow")
 	if err := os.WriteFile(reposPath, repos, 0o600); err != nil {
