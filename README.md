@@ -89,8 +89,9 @@ account `lima.yaml` creates, and activation fails anywhere else.
 $ nix flake show          # evaluates the flake
 $ nix develop             # git, go, jq, lima, nixfmt, nodejs
 $ nix build               # builds the CLI
-$ nix flake check         # runs the unit tests and evaluates the guest configuration
+$ nix flake check         # runs the unit tests and the two selftests
 $ nix fmt                 # format the Nix sources
+$ shellcheck verify/*/*.sh  # lint the gates and the red-team script
 ```
 
 The CLI needs `limactl` and `node`, and the gates need `curl`, `jq` and coreutils; the
@@ -137,8 +138,10 @@ hooks — and reports one line per attempt. The transcript is the evidence, so k
 $ crew-sandbox check redteam --workspace /path/to/repo --redteam-log redteam.log
 ```
 
-What is tested without a guest runs in `nix flake check`: the vault chain, the mount
-rendering, the guest configuration, and the proxy's and broker's `--selftest`:
+Nothing above is part of `nix flake check`. A Nix build has no VM and no network, so the
+gates only run from `crew-sandbox check`. What `nix flake check` covers is what a build
+can prove: the vault chain, the mount rendering, every embedded script parsing, an
+evaluation of the guest configuration, and the proxy's and broker's own `--selftest`:
 
 ```console
 $ crew-sandbox proxy --selftest    # 7 ClientHello parser cases

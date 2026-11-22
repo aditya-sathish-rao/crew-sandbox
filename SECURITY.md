@@ -152,8 +152,9 @@ or `SKIP` per attempt rather than pass/fail, and `--redteam-log FILE` keeps the 
 one was found.
 
 The proxy and broker each carry a `--selftest` that runs without a VM: seven
-ClientHello parser cases for the proxy, and the signing path for the broker. Those run
-in `nix flake check` today.
+ClientHello parser cases for the proxy, and the signing path for the broker. Those are
+what `nix flake check` runs, along with the unit tests; the gates above are not, because
+a Nix build has no VM and no network.
 
 ## 5. Failures found during development
 

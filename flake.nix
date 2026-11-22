@@ -33,12 +33,19 @@
         crew-sandbox = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
       });
 
-      # The Go unit tests. They cover the vault chain and the mount rendering; the
-      # guest-facing gates land in verify/ and are wired in as they are ported.
+      # Only what a build can prove with no VM and no network: the Go unit tests
+      # (which include every embedded script parsing), the proxy's and the broker's
+      # own --selftest, and an evaluation of the exported guest configuration.
+      #
+      # The gates are not here. They assert on a guest as it is right now, which
+      # needs a running VM, the operator's secrets and outbound network, so
+      # `crew-sandbox check` runs them.
       checks = forAllSystems (pkgs: {
         unit = pkgs.callPackage ./nix/checks/unit.nix { };
-        guest = pkgs.callPackage ./nix/checks/guest.nix { inherit nixpkgs home-manager; };
-        gates = pkgs.callPackage ./nix/checks/gates.nix { };
+        selftest = pkgs.callPackage ./nix/checks/selftest.nix {
+          crew-sandbox = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+          guest = pkgs.callPackage ./nix/checks/guest.nix { inherit nixpkgs home-manager; };
+        };
       });
 
       devShells = forAllSystems (pkgs: {

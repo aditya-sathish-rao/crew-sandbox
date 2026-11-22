@@ -10,6 +10,9 @@ per assertion, exiting non-zero on any failure. Phases add assertions; none are 
 so the gates that run are the gates that were built; this directory is where they are
 written and reviewed, not where they are read from at run time.
 
+`nix flake check` does not run them. A Nix build has no VM and no network, which is most
+of what a gate needs; it covers the unit tests and the two `--selftest` runs instead.
+
 A gate is a test of the boundary, not of the code that implements it. It asks the guest
 to do the forbidden thing and requires it to fail, so a change made by hand on a running
 VM is caught. The phases are `guest`, `root`, `toolchain`, `proxy`, `model`, `broker`
