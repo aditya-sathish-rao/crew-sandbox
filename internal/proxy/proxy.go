@@ -1,0 +1,121 @@
+// Package proxy runs the host-side egress proxy and model gateway. The proxy
+// itself is proxy.mjs, ported from agentic-dev-env; this package is the Go seam
+// that supplies its allowlist and its model key without either being baked into
+// the script.
+//
+// The proxy listens on 127.0.0.1 only. The guest reaches it through the host
+// gateway on the port the guest's firewall opens.
+package proxy
+
+import (
+	"context"
+	_ "embed"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+)
+
+//go:embed proxy.mjs
+var script []byte
+
+//go:embed egress-allow
+var defaultAllow []byte
+
+// Config is everything the proxy needs to start. The model key is resolved by the
+// caller through a vault.Provider and passed in; this package never reads a vault
+// itself.
+type Config struct {
+	// Allow is the egress allowlist. Empty means the embedded default.
+	Allow []byte
+	// ModelKey is the upstream model API key. Empty disables the model gateway,
+	// which is the safe default: a proxy without a key still enforces egress.
+	ModelKey string
+	// ModelToken is the guest's model token. Empty disables the model gateway.
+	ModelToken string
+	// ModelUpstream is the upstream base URL. Empty means the script's default.
+	ModelUpstream string
+	// Port is the listen port. Zero means 3128.
+	Port int
+	// Node is the node binary. Empty means "node" from PATH.
+	Node string
+}
+
+// Process is a prepared proxy invocation. The caller owns the lifecycle, which
+// keeps signal handling in one place; Cleanup removes the staged files and must be
+// called when the process exits.
+type Process struct {
+	Cmd     *exec.Cmd
+	Cleanup func()
+}
+
+// Command builds the proxy process without starting it. The staged files live in a
+// private temp directory that Cleanup removes.
+func Command(ctx context.Context, cfg Config) (*Process, error) {
+	dir, err := os.MkdirTemp("", "crew-proxy-")
+	if err != nil {
+		return nil, err
+	}
+	cleanup := func() { os.RemoveAll(dir) }
+
+	scriptPath := filepath.Join(dir, "proxy.mjs")
+	if err := os.WriteFile(scriptPath, script, 0o600); err != nil {
+		cleanup()
+		return nil, err
+	}
+
+	allow := cfg.Allow
+	if len(allow) == 0 {
+		allow = defaultAllow
+	}
+	allowPath := filepath.Join(dir, "egress-allow")
+	if err := os.WriteFile(allowPath, allow, 0o600); err != nil {
+		cleanup()
+		return nil, err
+	}
+
+	node := cfg.Node
+	if node == "" {
+		node = "node"
+	}
+	port := cfg.Port
+	if port == 0 {
+		port = 3128
+	}
+	args := []string{scriptPath, "--listen", strconv.Itoa(port), "--allow", allowPath}
+	if cfg.ModelUpstream != "" {
+		args = append(args, "--model-upstream", cfg.ModelUpstream)
+	}
+
+	cmd := exec.CommandContext(ctx, node, args...)
+	cmd.Env = append(os.Environ(), "CREW_MODEL_TOKEN="+cfg.ModelToken)
+	if cfg.ModelKey != "" {
+		cmd.Env = append(cmd.Env, "DEEPSEEK_API_KEY="+cfg.ModelKey)
+	}
+	return &Process{Cmd: cmd, Cleanup: cleanup}, nil
+}
+
+// SelfTest runs the proxy's ClientHello parser self-test. It proves the allowlist
+// parser and the SNI check without a network or a VM, so a broken build is caught
+// before the proxy is put in front of a guest.
+func SelfTest(ctx context.Context, cfg Config) error {
+	p, err := Command(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer p.Cleanup()
+	p.Cmd.Args = append(p.Cmd.Args, "--selftest")
+	p.Cmd.Stdout = os.Stderr
+	p.Cmd.Stderr = os.Stderr
+	if err := p.Cmd.Run(); err != nil {
+		return fmt.Errorf("proxy selftest: %w", err)
+	}
+	return nil
+}
+
+// ErrNoAllowlist is returned when the allowlist is empty. An empty allowlist would
+// deny everything, which is safe but almost never what the operator meant, so it
+// is reported as a configuration error instead.
+var ErrNoAllowlist = errors.New("proxy: allowlist is empty")

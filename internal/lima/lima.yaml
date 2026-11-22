@@ -1,0 +1,147 @@
+# The crew VM: one Ubuntu LTS guest that holds the whole fleet (herdr, the first
+# mate, the crewmates and the worktree pool). It is defined here so a rebuild
+# replaces it instead of patching it.
+#
+# Nothing from the host is mounted. `crew-sandbox check` asserts every property
+# below that a guest could otherwise lose silently.
+arch: aarch64
+os: Linux
+vmType: vz
+cpus: 4
+memory: 6GiB
+disk: 30GiB
+
+# Pinned by digest, not by tag: a rebuilt guest runs the bytes this file names.
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-arm64.img"
+    digest: "sha256:cf3b8472b84e7de37cdc2d2e9a9bf82b3edf0ab97113a1422eff048f26688e2f"
+
+mounts: []
+
+# `portForwards: []` is not "no forwards". The host agent always appends a fallback
+# rule that publishes every listener inside the guest on the host's own 127.0.0.1,
+# on the same port, for all ports and both protocols, and it reaches the guest
+# through the guest agent rather than the network, so the guest's firewall cannot
+# stop it. An `ignore` rule over the whole range removes it; the host agent only
+# honours that rule as the first entry in the list. `guestIPMustBeZero: false`
+# widens the match so it also covers a listener the guest binds to 127.0.0.1 only.
+portForwards:
+  - guestIP: 0.0.0.0
+    guestIPMustBeZero: false
+    proto: any
+    ignore: true
+
+containerd:
+  system: false
+  user: false
+
+ssh:
+  localPort: 0
+  loadDotSSHPubKeys: true
+  forwardAgent: false
+  forwardX11: false
+
+# The administration account. Lima provisions and re-provisions through it, so it
+# keeps sudo. Agents never use it; they run as `agent`, created without sudo below.
+user:
+  name: crew
+  home: /home/crew
+  shell: /bin/bash
+
+provision:
+  - mode: system
+    script: |
+      # The guest's model token authenticates it to the host gateway; it is not a
+      # model key. This runs before the marker below, so a VM created by an older
+      # definition gains a token on its next boot. It needs no network.
+      if [ ! -s /etc/crew-model-token ]; then
+        printf '%s' "$(openssl rand -hex 32)" >/etc/crew-model-token
+        chown root:root /etc/crew-model-token
+        chmod 0644 /etc/crew-model-token
+      fi
+
+      # Lima re-runs this on every boot. Once egress is closed that is fatal, so the
+      # marker makes a restart a no-op. Changing this file means re-creating the VM.
+      [ -e /etc/crew-provisioned ] && exit 0
+
+      set -eux
+
+      # Egress is open for this step only; the last block below closes it for good.
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y --no-install-recommends nftables curl dnsutils
+
+      id -u agent >/dev/null 2>&1 || useradd --create-home --shell /bin/bash agent
+
+      # Single-user Nix for the agent user: no daemon, no root needed afterwards.
+      # The upstream installer script is a mutable URL, so the tarball is fetched
+      # and verified directly against the hash that script itself pins.
+      install -d -o agent -g agent -m 0755 /nix
+      nix_version=2.36.0
+      nix_hash=ee696971de946d311699f6dd639cccc8c6734aec9a061b8e205de0ce6515e5ae
+      curl -fsSL -o /tmp/nix.tar.xz \
+        "https://releases.nixos.org/nix/nix-${nix_version}/nix-${nix_version}-aarch64-linux.tar.xz"
+      echo "${nix_hash}  /tmp/nix.tar.xz" | sha256sum -c -
+      tar -xJf /tmp/nix.tar.xz -C /tmp
+      # Run as the agent user, from /tmp: its shell must not start in the admin
+      # account's home, which it cannot read.
+      cd /tmp
+      su agent -c "./nix-${nix_version}-aarch64-linux/install --no-daemon"
+      rm -rf /tmp/nix.tar.xz "/tmp/nix-${nix_version}-aarch64-linux"
+
+      # Both levels, or the parent stays root-owned and home-manager cannot
+      # create its own directories inside it.
+      install -d -o agent -g agent /home/agent/.config /home/agent/.config/nix
+      printf 'experimental-features = nix-command flakes\n' \
+        >/home/agent/.config/nix/nix.conf
+      chown agent:agent /home/agent/.config/nix/nix.conf
+
+      subnet=$(ip -4 -o addr show scope global | awk '{print $4; exit}')
+      gw=$(ip -4 route show default | awk '{print $3; exit}')
+
+      # Root-owned, so the agent user can neither read nor rewrite it, and can only
+      # load a ruleset as root, which it cannot become.
+      cat >/etc/nftables.conf <<EOF
+      #!/usr/sbin/nft -f
+      flush ruleset
+
+      table inet crew {
+        chain input {
+          type filter hook input priority filter; policy drop;
+          iif lo accept
+          ct state established,related accept
+          ip saddr $subnet tcp dport 22 accept
+        }
+
+        chain output {
+          type filter hook output priority filter; policy drop;
+          oif lo accept
+          ct state established,related accept
+          # 3128 is the egress proxy, reached on the guest's gateway. It is the only
+          # port out. The token broker's 3129 is deliberately absent: it is an
+          # operator tool, and while it authenticates no caller a crewmate could
+          # mint itself a GitHub token. Reopen it only with the per-task secret that
+          # phase 4's spawn path injects, and assert it in checks/root.sh.
+          ip daddr $gw tcp dport 3128 accept
+        }
+      }
+      EOF
+
+      # Every login shell, for every user, finds the one door out. Derived from the
+      # gateway at boot so a subnet change cannot leave tools pointed at nothing.
+      cat >/etc/profile.d/crew-proxy.sh <<'PROXY'
+      _crew_gw=$(ip -4 route show default | awk '{print $3; exit}')
+      export https_proxy="http://${_crew_gw}:3128"
+      export http_proxy="$https_proxy" all_proxy="$https_proxy"
+      # The model gateway is on the host too, but it is a destination, not a proxy:
+      # a client that sends it through the CONNECT proxy would be refused.
+      export no_proxy="host.lima.internal" NO_PROXY="host.lima.internal"
+      unset _crew_gw
+      PROXY
+      chmod 0644 /etc/profile.d/crew-proxy.sh
+
+      chown root:root /etc/nftables.conf
+      chmod 0644 /etc/nftables.conf
+      systemctl enable --now nftables
+
+      touch /etc/crew-provisioned

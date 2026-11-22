@@ -9,8 +9,9 @@ This repository is the tool extracted from
 `nix/crew-sandbox/`. It is meant to be consumed there as a Nix flake input, so the sandbox can
 be versioned, reviewed and tested on its own.
 
-**Status: scaffold.** The flake evaluates and the directory skeleton exists. No sandbox logic
-has moved here yet; the working implementation still lives in `agentic-dev-env`.
+**Status: core ported.** The CLI, the VM definition, the token broker and the egress proxy are
+here and tested. The verification gates are not ported yet, so `crew-sandbox check` reports that
+plainly rather than pretending to pass.
 
 ## Why the boundary exists
 
@@ -46,22 +47,37 @@ what must not.
 }
 ```
 
-The intended consumer surface is a Nix module plus the host package set. Neither is exported
-yet; the flake currently exposes only `devShells` and `formatter`.
+The flake exposes `packages.default` (the CLI), `checks.unit` (the Go unit tests),
+`devShells.default` and `formatter`. The `darwinModules.default` module is not written yet; it
+lands when the host-side options are settled.
 
 ## Development
 
 ```console
 $ nix flake show          # evaluates the flake
-$ nix develop             # git, jq, nixfmt
+$ nix develop             # git, go, jq, lima, nixfmt, nodejs
+$ nix build               # builds the CLI
+$ nix flake check         # runs the unit tests
 $ nix fmt                 # format the Nix sources
 ```
+
+The CLI needs `limactl` and `node` on PATH; the packaged binary wraps both. Running it from
+`nix develop` gives you the same tools without the wrapper.
 
 ## Verification
 
 `verify/` holds the gates. Each gate is a script that takes a phase and runs named assertions,
 one line per assertion, exiting non-zero on any failure. Phases add assertions; none are
-removed. The gates are not implemented yet.
+removed. The gates are not ported yet, so `crew-sandbox check` exits with an error saying so.
+
+What is tested today is the part that does not need a guest: the vault provider chain and the
+mount rendering, run by `nix flake check`. The broker and proxy each carry a `--selftest` that
+exercises their parsing logic without a network or a VM:
+
+```console
+$ crew-sandbox proxy --selftest    # 7 ClientHello parser cases
+$ crew-sandbox broker --selftest   # JWT signing against the configured key
+```
 
 ## License
 
