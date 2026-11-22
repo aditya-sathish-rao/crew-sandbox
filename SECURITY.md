@@ -45,9 +45,9 @@ guest's disk is the only place untrusted code runs.
 
 ### 3.2 Nothing from the host is mounted
 
-`mounts: []` in the embedded definition. The guest has no virtiofs or 9p mount, so
-`/Users` does not exist inside it and there is no host directory with host
-permissions reachable from the guest.
+`mounts: []` in the embedded definition. The guest has no virtiofs or 9p mount unless
+`--workspace` is given, so `/Users` does not exist inside it and there is no host
+directory with host permissions reachable from the guest.
 
 A workspace mount is the one deliberate exception and it is opt-in per run:
 `crew-sandbox run --workspace DIR`. It is **read-only unless `--writable` is

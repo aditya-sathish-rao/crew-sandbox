@@ -26,8 +26,9 @@ gate is meant to prove.
 
 Concretely, the boundary is four things:
 
-- **A VM with `mounts: []`.** No host directory is mounted, so `/Users` does not exist inside
-  the guest. A workspace mount is opt-in per run and read-only unless `--writable` is passed.
+- **A VM with `mounts: []`.** No host directory is mounted unless `--workspace` is given, so
+  `/Users` does not exist inside the guest. A workspace mount is opt-in per run and read-only
+  unless `--writable` is passed.
 - **An nftables default-deny.** All input and output is dropped except loopback and the proxy
   port on the host gateway. The broker's port is deliberately not opened.
 - **A host proxy that names hosts.** It admits only the hostnames in `internal/allowlist/egress-allow`, and it
