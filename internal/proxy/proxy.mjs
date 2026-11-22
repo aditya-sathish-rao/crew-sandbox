@@ -19,7 +19,11 @@ const flag = (name, fallback) => {
 
 const port = Number(flag("--listen", "3128"));
 const allowFile = flag("--allow");
-const modelUpstream = flag("--model-upstream", "https://api.deepseek.com");
+// The upstream is a setting, not a constant. An empty value disables the model
+// gateway rather than defaulting to a vendor, so a proxy started without a
+// provider still enforces egress and cannot silently reach a hardcoded host.
+const modelUpstream = flag("--model-upstream", "");
+const modelName = flag("--model-name", "model");
 const keyHashOut = flag("--key-hash-out");
 const selftest = argv.includes("--selftest");
 // The selftest exercises the parser alone, so it needs no allowlist and can run
@@ -31,10 +35,12 @@ if (!allowFile && !selftest) {
 
 // The model key and the guest's token are independent: the key comes from the
 // vault when the proxy starts, the token is created inside the VM. Without both,
-// the gateway is disabled rather than open.
-const modelKey = process.env.DEEPSEEK_API_KEY;
+// the gateway is disabled rather than open. The key variable is provider-neutral:
+// the Go layer resolves whatever secret the operator configured and passes it
+// here, so this script never names a vendor.
+const modelKey = process.env.CREW_MODEL_KEY;
 const modelToken = process.env.CREW_MODEL_TOKEN;
-const modelReady = Boolean(modelKey && modelToken);
+const modelReady = Boolean(modelKey && modelToken && modelUpstream);
 if (keyHashOut) {
   const hash = modelKey ? crypto.createHash("sha256").update(modelKey).digest("hex") : "";
   fs.writeFileSync(keyHashOut, `${hash}\n`);
@@ -142,10 +148,12 @@ const parseClientHelloSni = (buffer) => {
   return { status: "ok", sni: null };
 };
 
-// The model gateway. pi's models.json points the deepseek provider at
+// The model gateway. The guest's model client points its provider at
 // http://host.lima.internal:3128/model, so the guest asks this route for
 // completions and the real key is added here, in the one host process that has it.
 // The route is closed unless both the vault key and the guest's token are present.
+// The upstream is whatever provider the operator configured; nothing here assumes
+// a vendor or a URL.
 const modelPrefix = "/model";
 const modelRoutes = new Map([
   ["GET /models", "/models"],
@@ -458,7 +466,7 @@ if (selftest) {
 }
 
 server.listen(port, "127.0.0.1", () => {
-  const model = modelReady ? `on ${modelUpstream}` : "disabled (no key or token)";
+  const model = modelReady ? `${modelName} on ${modelUpstream}` : "disabled (no key, token, or upstream)";
   console.error(
     `crew-proxy: listening on 127.0.0.1:${port} with ${rules.length} allowed hosts; model gateway ${model}`,
   );

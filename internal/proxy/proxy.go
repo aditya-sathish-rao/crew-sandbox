@@ -22,6 +22,20 @@ import (
 //go:embed proxy.mjs
 var script []byte
 
+// Provider describes the model provider the gateway forwards to. It is a setting,
+// not a constant: the gateway is provider-agnostic, so the operator names the
+// upstream. Nothing here assumes a vendor. The secret that authenticates it is
+// resolved by the caller and passed as Config.ModelKey; this package never reads a
+// vault.
+type Provider struct {
+	// Name is a label used in logs. Empty means "model".
+	Name string
+	// Upstream is the base URL requests are forwarded to. Empty disables the
+	// model gateway, which is the safe default: a proxy without a provider still
+	// enforces egress.
+	Upstream string
+}
+
 // Config is everything the proxy needs to start. The model key is resolved by the
 // caller through a vault.Provider and passed in; this package never reads a vault
 // itself.
@@ -29,13 +43,13 @@ type Config struct {
 	// Allow is the egress allowlist. Empty means the embedded default in
 	// internal/allowlist.
 	Allow []byte
+	// Provider is the model provider. An empty Upstream disables the gateway.
+	Provider Provider
 	// ModelKey is the upstream model API key. Empty disables the model gateway,
 	// which is the safe default: a proxy without a key still enforces egress.
 	ModelKey string
 	// ModelToken is the guest's model token. Empty disables the model gateway.
 	ModelToken string
-	// ModelUpstream is the upstream base URL. Empty means the script's default.
-	ModelUpstream string
 	// Port is the listen port. Zero means 3128.
 	Port int
 	// Node is the node binary. Empty means "node" from PATH.
@@ -90,14 +104,21 @@ func Command(ctx context.Context, cfg Config) (*Process, error) {
 		port = 3128
 	}
 	args := []string{scriptPath, "--listen", strconv.Itoa(port), "--allow", allowPath}
-	if cfg.ModelUpstream != "" {
-		args = append(args, "--model-upstream", cfg.ModelUpstream)
+	if cfg.Provider.Upstream != "" {
+		args = append(args, "--model-upstream", cfg.Provider.Upstream)
+	}
+	if cfg.Provider.Name != "" {
+		args = append(args, "--model-name", cfg.Provider.Name)
 	}
 
 	cmd := exec.CommandContext(ctx, node, args...)
 	cmd.Env = append(os.Environ(), "CREW_MODEL_TOKEN="+cfg.ModelToken)
 	if cfg.ModelKey != "" {
-		cmd.Env = append(cmd.Env, "DEEPSEEK_API_KEY="+cfg.ModelKey)
+		// The script reads the key from a fixed variable so the Go layer can pass
+		// it without the script knowing which provider it belongs to. The name is
+		// the seam, not a vendor: CREW_MODEL_KEY is set from whatever secret the
+		// caller resolved.
+		cmd.Env = append(cmd.Env, "CREW_MODEL_KEY="+cfg.ModelKey)
 	}
 	return &Process{Cmd: cmd, Cleanup: cleanup}, nil
 }

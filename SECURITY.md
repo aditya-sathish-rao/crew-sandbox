@@ -86,8 +86,12 @@ allowlist mean what it says:
   behind that CDN. A malformed handshake costs one tunnel, not the process.
 
 The model gateway is a separate route on the same proxy. It holds the model key and
-replaces the `Authorization` header, so the guest's `pi` reaches the model provider
+replaces the `Authorization` header, so the guest's model client reaches the provider
 without ever holding the key. The route is closed unless a key is configured.
+
+The gateway is provider-agnostic. The upstream URL and the secret name are settings,
+not constants, so the same gateway serves any provider and no vendor is hardcoded.
+With no upstream configured the gateway is disabled and the vault is not consulted.
 
 ### 3.5 Credentials are brokered, never handed over
 
