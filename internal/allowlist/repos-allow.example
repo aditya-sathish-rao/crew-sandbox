@@ -1,4 +1,6 @@
-# Repositories the broker may mint a task token for, one per line.
+# An example repository allowlist. The broker may mint a task token only for a
+# repository named here, one per line. Copy it and pass your own with
+# --repos-allow; the embedded copy is only a fallback.
 #
 # The App installation is the hard limit: a token for a repo outside it is refused
 # by GitHub. This file is the policy on top, so a task cannot ask for a different

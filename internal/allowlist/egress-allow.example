@@ -1,6 +1,7 @@
-# The guest's whole allowlist. Anything not named here is refused at the proxy,
+# An example egress allowlist. Anything not named here is refused at the proxy,
 # and the guest firewall drops everything that is not the proxy port, so this file
-# is the only place egress is widened.
+# is the only place egress is widened. Copy it and pass your own with
+# --egress-allow; the embedded copy is only a fallback.
 #
 # A line starting with a dot matches that domain and every subdomain; a bare name
 # matches exactly. Add a host only with the reason it is needed.

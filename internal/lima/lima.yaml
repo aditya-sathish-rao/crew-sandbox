@@ -1,6 +1,5 @@
-# The crew VM: one Ubuntu LTS guest that holds the whole fleet (herdr, the first
-# mate, the crewmates and the worktree pool). It is defined here so a rebuild
-# replaces it instead of patching it.
+# The guest VM: one Ubuntu LTS guest that holds whatever runs inside the boundary.
+# It is defined here so a rebuild replaces it instead of patching it.
 #
 # Nothing from the host is mounted. `crew-sandbox check` asserts every property
 # below that a guest could otherwise lose silently.

@@ -74,7 +74,8 @@ root-owned and not writable by `agent`.
 ### 3.4 The proxy is the only way out, and it names hosts
 
 The host-side proxy is a CONNECT proxy on 127.0.0.1:3128. It admits only the
-hostnames in `internal/allowlist/egress-allow`, and only on ports 443 and 80. Two properties make the
+hostnames in the egress allowlist — `internal/allowlist/egress-allow.example` unless
+`--egress-allow` supplies one — and only on ports 443 and 80. Two properties make the
 allowlist mean what it says:
 
 - **Plain HTTP:** the guest's `Host` header is discarded and set from the
@@ -167,9 +168,9 @@ on tmpfs and treating a failed copy as a named tampering failure.
 
 ## 6. Non-goals and known limitations
 
-- **The first mate is inside the boundary.** It runs in the same guest as the
-  crewmates and must not hold the vault. A first-mate compromise is contained by the
-  same kernel boundary, but it is not separated from the crewmates.
+- **Everything runs in one guest.** Commands share the same kernel boundary and are
+  not separated from each other. A compromise of one is contained by the VM, but not
+  from the others inside it.
 - **A CONNECT proxy cannot see inside TLS.** The guarantee is "only allowlisted
   hostnames", not "only their ordinary traffic". A client that skips certificate
   validation can present an allowed SNI and talk to whatever answers.

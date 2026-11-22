@@ -14,17 +14,22 @@ import (
 	"strings"
 )
 
-// Egress is the hostname allowlist the proxy enforces. A line starting with a dot
-// matches that domain and its subdomains; a bare name matches exactly. A `#`
-// starts a comment.
+// Egress is the example hostname allowlist the proxy enforces when the operator
+// supplies none. A line starting with a dot matches that domain and its
+// subdomains; a bare name matches exactly. A `#` starts a comment.
 //
-//go:embed egress-allow
+// It is an example, not a policy: it names the hosts this tool needs to build and
+// fetch its own dependencies. An operator with different needs supplies their own
+// file with --egress-allow.
+//
+//go:embed egress-allow.example
 var Egress []byte
 
-// Repos is the repository allowlist the broker enforces. A token is minted only
-// for a repository named here. A `#` starts a comment.
+// Repos is the example repository allowlist the broker enforces when the operator
+// supplies none. A token is minted only for a repository named here. A `#` starts
+// a comment.
 //
-//go:embed repos-allow
+//go:embed repos-allow.example
 var Repos []byte
 
 // ErrEmpty is returned when a policy file names no entries. An empty allowlist is

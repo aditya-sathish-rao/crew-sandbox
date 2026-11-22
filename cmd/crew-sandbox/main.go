@@ -4,8 +4,8 @@
 //
 // The contract is deliberately tool-agnostic: `crew-sandbox run --workspace DIR
 // -- COMMAND` starts the guest if needed, runs COMMAND inside it, and returns its
-// exit status. Nothing about herdr, first mate, or any other orchestrator appears
-// here; those adapt to this contract in examples/.
+// exit status. No orchestrator is named here; anything that runs commands adapts
+// to this contract in examples/.
 package main
 
 import (
@@ -46,6 +46,10 @@ proxy flags:
   --model-provider NAME  provider label used in logs (default: model)
   --model-upstream URL   model provider base URL; empty disables the gateway
   --model-key-env NAME   vault secret holding the model key (default: CREW_MODEL_KEY)
+  --egress-allow FILE    hostname allowlist; empty uses the embedded example
+
+broker flags:
+  --repos-allow FILE     repository allowlist; empty uses the embedded example
 
 The guest sees nothing of the host unless --workspace is given. That is the
 boundary: a workspace mount is the one deliberate exception, and it is read-only
@@ -260,6 +264,7 @@ func cmdBroker(ctx context.Context, args []string) error {
 	appID := fs.String("app-id", "", "GitHub App ID (not a secret)")
 	port := fs.Int("port", 0, "listen port (default 3129)")
 	installation := fs.String("installation", "", "pin the installation ID")
+	reposAllow := fs.String("repos-allow", "", "repository allowlist file; empty uses the embedded example")
 	selftest := fs.Bool("selftest", false, "run the signing self-test and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -274,6 +279,13 @@ func cmdBroker(ctx context.Context, args []string) error {
 		PrivateKey:     key,
 		Port:           *port,
 		InstallationID: *installation,
+	}
+	if *reposAllow != "" {
+		repos, err := os.ReadFile(*reposAllow)
+		if err != nil {
+			return fmt.Errorf("repos allowlist: %w", err)
+		}
+		cfg.Repos = repos
 	}
 	if *selftest {
 		return broker.SelfTest(ctx, cfg)
@@ -300,6 +312,7 @@ func cmdProxy(ctx context.Context, args []string) error {
 	providerName := fs.String("model-provider", "model", "provider label used in logs")
 	upstream := fs.String("model-upstream", "", "model provider base URL; empty disables the gateway")
 	keyEnv := fs.String("model-key-env", "CREW_MODEL_KEY", "vault secret name holding the model key")
+	egressAllow := fs.String("egress-allow", "", "hostname allowlist file; empty uses the embedded example")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -317,6 +330,13 @@ func cmdProxy(ctx context.Context, args []string) error {
 			Upstream: *upstream,
 		},
 		Port: *port,
+	}
+	if *egressAllow != "" {
+		allow, err := os.ReadFile(*egressAllow)
+		if err != nil {
+			return fmt.Errorf("egress allowlist: %w", err)
+		}
+		cfg.Allow = allow
 	}
 
 	// The model key is optional. Egress enforcement does not need it, and a proxy

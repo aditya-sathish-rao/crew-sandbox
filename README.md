@@ -1,8 +1,8 @@
 # crew-sandbox
 
-A Linux VM boundary for untrusted agent work. The crew's panes, the first mate and the
-crewmates run inside one Lima guest; the Mac keeps the credentials, the egress policy and the
-token broker. Nothing from the host is mounted into the guest.
+A Linux VM boundary for untrusted agent work. The commands you run under it execute inside one
+Lima guest; the Mac keeps the credentials, the egress policy and the token broker. Nothing from
+the host is mounted into the guest.
 
 This repository is the tool extracted from
 [`agentic-dev-env`](https://github.com/aditya-sathish-rao/agentic-dev-env), where it started as
@@ -31,7 +31,8 @@ Concretely, the boundary is four things:
   unless `--writable` is passed.
 - **An nftables default-deny.** All input and output is dropped except loopback and the proxy
   port on the host gateway. The broker's port is deliberately not opened.
-- **A host proxy that names hosts.** It admits only the hostnames in `internal/allowlist/egress-allow`, and it
+- **A host proxy that names hosts.** It admits only the hostnames in the egress allowlist
+  (`internal/allowlist/egress-allow.example` unless `--egress-allow` supplies one), and it
   reads the TLS handshake so an allowlisted CDN address cannot reach another site behind it.
 - **A host broker that holds the key.** GitHub tokens are minted per task and never handed to
   the guest as a long-lived credential.
@@ -46,7 +47,7 @@ Concretely, the boundary is four things:
 | `nix/packages/`  | The host package set the CLI and the darwin module depend on.                   |
 | `verify/gates/`  | One script per invariant in [SECURITY.md](SECURITY.md).                         |
 | `verify/redteam/`| Adversarial simulations that try to break those invariants.                     |
-| `examples/`      | Minimal consumer flakes, including orchestrator wiring such as `herdr`.         |
+| `examples/`      | Minimal consumer flakes showing how to import this repo.                        |
 
 Every directory carries a short `README.md` stating its boundary: what runs there, and
 what must not.
