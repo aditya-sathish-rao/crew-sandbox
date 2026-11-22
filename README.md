@@ -148,6 +148,33 @@ $ crew-sandbox proxy --selftest    # 7 ClientHello parser cases
 $ crew-sandbox broker --selftest   # JWT signing against the configured key
 ```
 
+### Where the gates run
+
+On the operator's machine, against the operator's guest. They are not wired into CI, and a
+self-hosted runner is not worth it yet, for three reasons:
+
+- **No hosted runner can run them.** The guest is `vmType: vz`, which is Apple's
+  Virtualization.framework, and a GitHub-hosted macOS runner is itself a machine virtualized
+  with that framework. GitHub's runner reference states that for arm64 macOS runners
+  "nested-virtualization is not supported due to the limitation of Apple's Virtualization
+  Framework" ([reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)),
+  and the guest is arm64. The x86 macOS runners fail on the architecture rather than on
+  nesting.
+- **The boundary being measured is the operator's.** The `guest` phase asserts that a
+  listener started in the guest never appears on *this* machine's loopback, and the proxy
+  phases measure *this* machine's gateway address. A pass on someone else's hardware would
+  not describe the machine it was meant to protect.
+- **Two phases spend real credentials.** `model` reads the model key out of the vault and
+  `broker` mints a live GitHub App token, writes an agent branch and revokes. Handing those
+  to a runner adds a credential surface where the tool exists to remove one.
+
+`nix flake check` is what a runner could do, and what CI would run if it were added: unit
+tests and the two selftests, with no VM and no network.
+
+A self-hosted runner on a spare Mac is the only way to run the gates in CI. It becomes worth
+arguing for when someone other than the operator needs the result — and it would mean that
+Mac executes whatever a triggering branch contains, which is its own boundary to justify.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

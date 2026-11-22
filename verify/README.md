@@ -13,6 +13,11 @@ written and reviewed, not where they are read from at run time.
 `nix flake check` does not run them. A Nix build has no VM and no network, which is most
 of what a gate needs; it covers the unit tests and the two `--selftest` runs instead.
 
+They run on the operator's own machine rather than in CI. No hosted runner can nest the
+guest — GitHub's arm64 macOS runners cannot nest a Virtualization.framework VM, and the
+guest is arm64 — and the boundary they measure is that machine's. The README's
+"Where the gates run" has the full argument.
+
 A gate is a test of the boundary, not of the code that implements it. It asks the guest
 to do the forbidden thing and requires it to fail, so a change made by hand on a running
 VM is caught. The phases are `guest`, `root`, `toolchain`, `proxy`, `model`, `broker`
