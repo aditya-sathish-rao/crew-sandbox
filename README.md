@@ -92,4 +92,4 @@ $ crew-sandbox broker --selftest   # JWT signing against the configured key
 
 ## License
 
-Not yet chosen.
+MIT. See [LICENSE](LICENSE).

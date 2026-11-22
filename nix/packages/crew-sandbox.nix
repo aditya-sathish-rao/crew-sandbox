@@ -33,6 +33,7 @@ buildGoModule {
   meta = {
     description = "Run untrusted agent work inside a Linux VM boundary";
     homepage = "https://github.com/aditya-sathish-rao/crew-sandbox";
+    license = lib.licenses.mit;
     mainProgram = "crew-sandbox";
     platforms = [
       "aarch64-darwin"
