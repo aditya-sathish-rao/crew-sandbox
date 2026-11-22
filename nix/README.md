@@ -1,9 +1,11 @@
 # `nix/`
 
-The flake's Nix surface. Two halves, split by where the code runs.
+The flake's Nix surface. Three parts, split by where the code runs.
 
 - `modules/` — Nix modules exported to consumers, including `darwinModules.default`.
 - `packages/` — the host package set the CLI and the darwin module depend on.
+- `guest/` — the guest's home-manager configuration, exported as `homeManagerModules.default`.
 
-Nothing in this directory is guest-side. The guest's own configuration is a separate
-home-manager module, and it is not exported to consumers.
+`guest/` is the only guest-side code here. It runs inside the VM as `agent`, so nothing in
+it may need root, and it reaches the host only through the egress proxy and the model
+gateway that `lima.yaml` provisions.

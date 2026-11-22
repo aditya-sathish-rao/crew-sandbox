@@ -9,9 +9,10 @@ This repository is the tool extracted from
 `nix/crew-sandbox/`. It is meant to be consumed there as a Nix flake input, so the sandbox can
 be versioned, reviewed and tested on its own.
 
-**Status: core ported.** The CLI, the VM definition, the token broker and the egress proxy are
-here and tested. The verification gates are not ported yet, so `crew-sandbox check` reports that
-plainly rather than pretending to pass.
+**Status: core and guest config ported.** The CLI, the VM definition, the token broker, the
+egress proxy and the guest's home-manager configuration are here and tested. The verification
+gates are not ported yet, so `crew-sandbox check` reports that plainly rather than pretending
+to pass.
 
 ## Why the boundary exists
 
@@ -45,6 +46,7 @@ Concretely, the boundary is four things:
 | `internal/`      | Implementation packages the CLI drives: VM lifecycle, proxy, broker.            |
 | `nix/modules/`   | Nix modules exported to consumers, including `darwinModules.default`.           |
 | `nix/packages/`  | The host package set the CLI and the darwin module depend on.                   |
+| `nix/guest/`     | The guest's home-manager configuration, exported as `homeManagerModules`.       |
 | `verify/gates/`  | One script per invariant in [SECURITY.md](SECURITY.md).                         |
 | `verify/redteam/`| Adversarial simulations that try to break those invariants.                     |
 | `examples/`      | Minimal consumer flakes showing how to import this repo.                        |
@@ -61,8 +63,25 @@ what must not.
 ```
 
 The flake exposes `packages.default` (the CLI), `checks.unit` (the Go unit tests),
-`devShells.default` and `formatter`. The `darwinModules.default` module is not written yet; it
-lands when the host-side options are settled.
+`checks.guest` (the guest configuration, evaluated), `homeManagerModules.default` (that
+configuration) and `devShells.default`/`formatter`. The `darwinModules.default` module is
+not written yet; it lands when the host-side options are settled.
+
+The guest configuration names no tools of its own. Pass the fleet as `extraPackages`, and
+the guest gets exactly those and a shell:
+
+```nix
+{
+  homeConfigurations."agent@aarch64-linux" = home-manager.lib.homeManagerConfiguration {
+    pkgs = nixpkgs.legacyPackages.aarch64-linux;
+    modules = [ crew-sandbox.homeManagerModules.default ];
+    extraSpecialArgs = { extraPackages = [ pi.packages.aarch64-linux.default ]; };
+  };
+}
+```
+
+The username and home directory are not options: `nix/guest/` fixes them to the `agent`
+account `lima.yaml` creates, and activation fails anywhere else.
 
 ## Development
 
@@ -70,7 +89,7 @@ lands when the host-side options are settled.
 $ nix flake show          # evaluates the flake
 $ nix develop             # git, go, jq, lima, nixfmt, nodejs
 $ nix build               # builds the CLI
-$ nix flake check         # runs the unit tests
+$ nix flake check         # runs the unit tests and evaluates the guest configuration
 $ nix fmt                 # format the Nix sources
 ```
 

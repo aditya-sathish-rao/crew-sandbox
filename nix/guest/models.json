@@ -1,0 +1,9 @@
+{
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "providers": {
+    "deepseek": {
+      "baseUrl": "http://host.lima.internal:3128/model",
+      "apiKey": "!cat /etc/crew-model-token"
+    }
+  }
+}
