@@ -90,17 +90,33 @@ func (g Guest) Status() (Status, error) {
 	return Status(strings.TrimSpace(out)), nil
 }
 
+// ErrMountsNotApplied is returned when a mount was requested for an instance that
+// already exists. Lima fixes mounts at creation time, so starting an existing
+// instance cannot add one. Silently ignoring the request would run the command
+// without the workspace the operator asked for, which is worse than refusing.
+var ErrMountsNotApplied = errors.New("mounts cannot be added to an existing instance")
+
 // Start creates the instance if it is missing and starts it. It is idempotent:
 // starting a running instance is a no-op.
+//
+// A mount is only honoured when the instance is created. If mounts were requested
+// and the instance already exists, Start refuses rather than running the command
+// without the workspace.
 func (g Guest) Start() error {
 	status, err := g.Status()
 	if err != nil {
 		return err
 	}
 	if status == StatusRunning {
+		if len(g.Mounts) > 0 {
+			return fmt.Errorf("%w: %s is already running without them; destroy it first", ErrMountsNotApplied, g.Name)
+		}
 		return nil
 	}
 	if status == StatusStopped {
+		if len(g.Mounts) > 0 {
+			return fmt.Errorf("%w: %s already exists without them; destroy it first", ErrMountsNotApplied, g.Name)
+		}
 		_, err := g.run("start", "--tty=false", g.Name)
 		return err
 	}
