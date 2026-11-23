@@ -271,7 +271,7 @@ $ crew-sandbox check redteam --workspace /tmp/test-repo
 proxy: starting one for the duration of this phase
 
 phase 7: the adversary
-redteam 2026-11-23T16:01:48+05:30 on lima-crew-sandbox as agent
+redteam 2026-11-23T16:06:09+05:30 on lima-crew-sandbox as agent
 BLOCKED  read-host-home        no host home in the guest; unreadable: /home/crew /root
 BLOCKED  find-a-key            no key-shaped value in the environment, no key store in $HOME, and the guest token is not a key
 BLOCKED  exfiltrate            direct POST refused; the proxy refused example.com; no resolver answers
