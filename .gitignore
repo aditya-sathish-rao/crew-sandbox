@@ -1,3 +1,20 @@
 result
 result-*
 .lavish/*
+
+# graphify writes these next to its output. Only graph.json and
+# GRAPH_REPORT.md are committed; the rest is per-machine cache or regenerable
+# output (graph.html pulls vis-network from a CDN). See docs/code-graph.md,
+# which refreshes them with `graphify update .` and `graphify cluster-only .`.
+graphify-out/graph.html
+graphify-out/cache/
+graphify-out/manifest.json
+graphify-out/.graphify_analysis.json
+graphify-out/.graphify_labels.json
+graphify-out/.graphify_labels.json.sig
+graphify-out/.graphify_partition_cache.json
+graphify-out/.graphify_build.json
+graphify-out/.graphify_build_state.json
+graphify-out/.graphify_root
+# graphify's dated regeneration backups: graphify-out/2026-11-24/ and so on.
+graphify-out/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/
