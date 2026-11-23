@@ -108,6 +108,7 @@ built:
 ```console
 $ crew-sandbox check guest      # no mount, no sudo, default-deny egress, no host forward
 $ crew-sandbox check root       # the ruleset, sudoers and the gate directory
+$ crew-sandbox check toolchain  # the fleet resolves under /nix/store
 $ crew-sandbox check proxy      # the allowlist names hosts, not addresses
 $ crew-sandbox check model      # the key stays on the host
 $ crew-sandbox check broker     # one repo, one token, revoked at teardown
@@ -137,6 +138,73 @@ hooks — and reports one line per attempt. The transcript is the evidence, so k
 ```console
 $ crew-sandbox check redteam --workspace /path/to/repo --redteam-log redteam.log
 ```
+
+### What a run reports
+
+Every phase prints one line per assertion it reaches, so these counts are what a healthy
+run prints. With one expected tool and every input supplied, `check all` prints 81:
+
+| Phase | Assertions | Needs |
+| --- | --- | --- |
+| `guest` | 13 | a running guest; `--workspace` if one is mounted |
+| `root` | 10 | a running guest |
+| `toolchain` | 3 + one per `--expected-tools` name | `--expected-tools` |
+| `proxy` | 10 | a running guest; starts its own keyless proxy |
+| `model` | 22 | `--model-upstream`, the model key in the vault, and an applied guest configuration |
+| `broker` | 15 | `--app-id`, `--other-repo`, and the App private key in the vault |
+| `redteam` | 7 | a running guest; one line per attack, `BLOCKED` or `SKIP` |
+
+`model` is 22 rather than 12 because it re-runs the nine allowlist assertions through the
+keyed proxy: a run that proved the key stays home while the allowlist was wrong would
+report a boundary that does not exist. `toolchain` counts what the operator names, so its
+total is theirs.
+
+### A recorded run
+
+Against this repository's guest on 2026-11-23 (aarch64), with `/tmp/test-repo` mounted
+read-only. These two phases need nothing from the vault.
+
+```console
+$ crew-sandbox check guest --workspace /tmp/test-repo
+
+phase 1: the guest
+PASS  running as agent
+PASS  the host filesystem is absent
+PASS  the workspace is the only host directory mounted, read-only
+PASS  egress to an arbitrary host is blocked
+PASS  a query to an arbitrary resolver is blocked
+PASS  the system resolver cannot resolve
+PASS  the host is unreachable on any port but the proxy
+PASS  sudo is unavailable
+PASS  the firewall cannot be flushed
+PASS  the firewall ruleset cannot be read
+PASS  the firewall configuration is not writable
+PASS  a guest listener on every address stays off the host
+PASS  a guest listener on loopback stays off the host
+
+guest: pass
+
+$ crew-sandbox check redteam --workspace /tmp/test-repo
+proxy: starting one for the duration of this phase
+
+phase 7: the adversary
+redteam 2026-11-23T12:47:00+05:30 on lima-crew-sandbox as agent
+BLOCKED  read-host-home        no host home in the guest; unreadable: /home/crew /root
+BLOCKED  find-a-key            no key-shaped value in the environment, no key store in $HOME, and the guest token is not a key
+BLOCKED  exfiltrate            direct POST refused; the proxy refused example.com; no resolver answers
+BLOCKED  push-to-github        api.github.com refuses the guest (401); no repository was named to push to
+BLOCKED  reach-host-services   nothing on 192.168.5.2 accepts a connection except the proxy port
+BLOCKED  escalate              sudo refused; the ruleset cannot be flushed; the ruleset file is not writable
+BLOCKED  plant-in-workspace    the workspace is read-only, so no file and no symlink could be planted
+
+redteam: 7/7 blocked
+
+redteam: pass
+```
+
+`model` and `broker` are not in that transcript: both need the vault, and `model` also
+needs a guest with the home-manager configuration applied. A phase whose input is missing
+says which flag it wanted and fails — it does not pass over an assertion it could not make.
 
 Nothing above is part of `nix flake check`. A Nix build has no VM and no network, so the
 gates only run from `crew-sandbox check`. What `nix flake check` covers is what a build
