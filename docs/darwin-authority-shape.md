@@ -18,7 +18,7 @@ approves. It does not test a root `LaunchDaemon`. See
 
 ## Lifetime, not privilege, is the deciding axis
 
-All three shapes can hold the key. They differ in *when the process exists* relative to login,
+All three shapes can hold the key. They differ in _when the process exists_ relative to login,
 and therefore in who is available to answer the vault.
 
 ```text
@@ -30,7 +30,7 @@ C · on demand                        ██████████  ends with 
 ```
 
 Guest lifetime is itself login-bound: `limactl` runs as the operator, so the VM and the user
-agent share a window. On-demand is the only shape that can end *before* the guest does — and
+agent share a window. On-demand is the only shape that can end _before_ the guest does — and
 that gap has consequences below.
 
 ## The three options
@@ -39,12 +39,12 @@ that gap has consequences below.
 
 `launchd.daemons`, root, boots before any login.
 
-| | |
-| --- | --- |
-| Unattended boot | Works — and is the only shape that survives a power cut. |
-| The key | No session, no approver. `av inject` answers "human approval required" and the service comes up keyless. |
-| Silent failure | A keyless proxy does not exit: it logs `model gateway disabled` and keeps serving egress. The boundary looks up while the gateway is off. |
-| Evidence | *Inferred.* Never run as root. |
+- **Unattended boot** — works, and is the only shape that survives a power cut.
+- **The key** — no session, no approver. `av inject` answers "human approval required" and
+  the service comes up keyless.
+- **Silent failure** — a keyless proxy does not exit: it logs `model gateway disabled` and
+  keeps serving egress. The boundary looks up while the gateway is off.
+- **Evidence** — inferred. Never run as root.
 
 `nix/modules/darwin.nix:7-30` · `cmd/crew-sandbox/main.go:396-402`
 
@@ -52,12 +52,10 @@ that gap has consequences below.
 
 `launchd.user.agents`, as the operator, inside the GUI session.
 
-| | |
-| --- | --- |
-| Unattended boot | Not supported. Services start at login; nobody logs in, nothing runs. |
-| The key | Prompt is answerable; a Temporary Access Grant can bind to the job. |
-| Failure direction | Closed, not open — no proxy means the guest has no egress at all. |
-| Evidence | *Measured*, and evaluated in CI. |
+- **Unattended boot** — not supported. Services start at login; nobody logs in, nothing runs.
+- **The key** — the prompt is answerable, and a Temporary Access Grant can bind to the job.
+- **Failure direction** — closed, not open: no proxy means the guest has no egress at all.
+- **Evidence** — measured, and evaluated in CI.
 
 `nix/modules/darwin.nix:90-100` · `nix/checks/darwin.nix` · `darwin-module.md` §The result
 
@@ -65,12 +63,11 @@ that gap has consequences below.
 
 The supervisor is a child of the shell that asked for work.
 
-| | |
-| --- | --- |
-| Unattended boot | Never — there is no shell at boot. |
-| The key | Best approval story of the three: interactive by construction. |
-| Revocation | Tokens live in the broker's memory (`issued`). If the process exits, `down` has nothing to revoke. |
-| Evidence | *Measured* as a gate-only pattern. |
+- **Unattended boot** — never; there is no shell at boot.
+- **The key** — best approval story of the three, interactive by construction.
+- **Revocation** — tokens live in the broker's memory (`issued`), so a process that exits
+  leaves `down` with nothing to revoke.
+- **Evidence** — measured as a gate-only pattern.
 
 `internal/broker/broker.mjs:177,266` · `cmd/crew-sandbox/main.go:251-256` ·
 `verify/gates/check.sh:379-395`
@@ -78,16 +75,16 @@ The supervisor is a child of the shell that asked for work.
 ## Scorecard
 
 Ordered by how much each criterion constrains the answer. The last row is what makes C unusable
-as a *standing* service.
+as a _standing_ service.
 
-| Criterion | A · daemon | B · user agent | C · on demand |
-| --- | --- | --- | --- |
-| Can start with no human present | no key | no | no |
-| Key read has an approver | nobody | desktop | terminal |
-| Covers the guest's whole life | yes | yes | not by design |
-| Failure is closed, not open | **open** | closed | silent timeout |
-| `down` can revoke what was minted | yes | yes | **registry lost** |
-| Already implemented and checked | no | yes | gate only |
+| Criterion                         | A · daemon | B · user agent | C · on demand     |
+| --------------------------------- | ---------- | -------------- | ----------------- |
+| Can start with no human present   | no key     | no             | no                |
+| Key read has an approver          | nobody     | desktop        | terminal          |
+| Covers the guest's whole life     | yes        | yes            | not by design     |
+| Failure is closed, not open       | **open**   | closed         | silent timeout    |
+| `down` can revoke what was minted | yes        | yes            | **registry lost** |
+| Already implemented and checked   | no         | yes            | gate only         |
 
 ## The two facts that decide it
 
@@ -127,8 +124,8 @@ domain, a different user and a different vault. One run there closes the questio
 
 **Suggested edit.** In [`darwin-module.md`](darwin-module.md), under "The result",
 change "A `LaunchDaemon` cannot hold the model key" from a measured finding into the
-narrower, provable statement: a daemon cannot obtain the key *without an operator-arranged
-policy*. Then either run the `system/` probe or cite the policy gap as the reason the option
+narrower, provable statement: a daemon cannot obtain the key _without an operator-arranged
+policy_. Then either run the `system/` probe or cite the policy gap as the reason the option
 is out.
 
 ## Recommendation: split the question by lifetime
@@ -159,7 +156,7 @@ different reasons to stay up, and those reasons point the same way.
 - **F3** — Persist the broker's issued-token registry, so revocation is not tied to one
   process's lifetime.
 - **F4** — Extend [`nix/checks/darwin.nix`](../nix/checks/darwin.nix) to assert the LaunchAgent
-  is the *only* shape registered, with the reasoning recorded next to it.
+  is the _only_ shape registered, with the reasoning recorded next to it.
 - **F5** — Record the lifetime argument as an ADR, next to the measurement it rests on.
 
 ## Sources read for this record

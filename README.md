@@ -110,7 +110,9 @@ They run at login, as you, so the vault's approval prompt lands on a desktop whe
 human can answer it. A system daemon cannot do this: it starts before login, and the
 vault answers a keyless, unattended call with "human approval required". The trade is
 explicit — a Mac that reboots unattended has no egress proxy until someone logs in. See
-[`docs/darwin-module.md`](docs/darwin-module.md) for the measurement behind that choice.
+[`docs/darwin-module.md`](docs/darwin-module.md) for the measurement behind that choice,
+and [`docs/darwin-authority-shape.md`](docs/darwin-authority-shape.md) for the comparison
+against a system daemon and against starting the services on demand.
 
 ### Applying it to the guest
 
