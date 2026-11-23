@@ -11,14 +11,18 @@ package lima
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 )
 
 //go:embed lima.yaml
@@ -27,6 +31,24 @@ var definition []byte
 // ErrNotInstalled is returned when limactl is not on PATH. The caller turns this
 // into an actionable message rather than a stack trace.
 var ErrNotInstalled = errors.New("limactl not found on PATH")
+
+// AgentUser is the unprivileged account inside the guest. The Lima user is the
+// administration account and keeps passwordless sudo, so anything the operator
+// did not write must run as AgentUser rather than as the Lima user.
+const AgentUser = "agent"
+
+// AsAgent wraps argv so the guest runs it as AgentUser instead of as the Lima
+// user. This is the same wrapper the gates use.
+//
+// `sudo -n` fails closed: if the guest ever stopped permitting it, the command
+// fails rather than silently running as the administration account. `-H` points
+// HOME at the agent's home, so tool configuration and caches are the agent's
+// rather than the admin account's.
+func AsAgent(argv []string) []string {
+	wrapped := make([]string, 0, len(argv)+6)
+	wrapped = append(wrapped, "sudo", "-n", "-u", AgentUser, "-H", "--")
+	return append(wrapped, argv...)
+}
 
 // Guest is a handle on one Lima instance.
 type Guest struct {
@@ -119,7 +141,10 @@ func (g Guest) Start() error {
 		return err
 	}
 	if !mountsSatisfied(g.Mounts, applied) {
-		return fmt.Errorf("%w: %s already exists without them; destroy it first", ErrMountsNotApplied, g.Name)
+		return fmt.Errorf(
+			"%w: %s was created with [%s] and this run asked for [%s]; destroy it and start it again",
+			ErrMountsNotApplied, g.Name, describeMounts(applied), describeMounts(g.Mounts),
+		)
 	}
 	if status == StatusRunning {
 		return nil
@@ -159,14 +184,51 @@ func (g Guest) appliedMounts() ([]Mount, error) {
 	return mounts, nil
 }
 
-// mountsSatisfied reports whether every requested mount is already present with
-// the same location, mount point and writability. A read-only request is not
-// satisfied by a writable mount: the guest would have more access than asked for.
+// describeMounts renders a mount list for an error message, so an operator can see
+// which side differs: a mount they asked for and did not get, or one they did not ask
+// for and already have.
+func describeMounts(mounts []Mount) string {
+	if len(mounts) == 0 {
+		return "no mounts"
+	}
+	parts := make([]string, 0, len(mounts))
+	for _, m := range mounts {
+		mode := "ro"
+		if m.Writable {
+			mode = "rw"
+		}
+		parts = append(parts, fmt.Sprintf("%s -> %s (%s)", m.Location, m.MountPoint, mode))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// mountsSatisfied reports whether the requested mounts and the instance's applied
+// mounts are the same set.
+//
+// Both directions matter. A missing mount would run the command without the
+// workspace the operator asked for. An *extra* mount is the more dangerous
+// direction: an instance created earlier with a writable workspace carries that
+// mount for its whole life, so a later run that asks for no workspace at all would
+// otherwise pass this check and run against a writable host mount the operator
+// believes is not there. Equality is also what makes the boundary stated in the
+// README - "nothing from the host is mounted unless --workspace is given" - true of
+// an existing instance rather than only of a freshly created one.
+//
+// A read-only request is not satisfied by a writable mount: the guest would have
+// more access than asked for.
 func mountsSatisfied(want, have []Mount) bool {
+	if len(want) != len(have) {
+		return false
+	}
+	matched := make([]bool, len(have))
 	for _, w := range want {
 		found := false
-		for _, h := range have {
+		for i, h := range have {
+			if matched[i] {
+				continue
+			}
 			if h.Location == w.Location && h.MountPoint == w.MountPoint && h.Writable == w.Writable {
+				matched[i] = true
 				found = true
 				break
 			}
@@ -210,12 +272,19 @@ func (g Guest) create() error {
 	return err
 }
 
+// yqString escapes a value for the double-quoted YAML scalar mountOverride builds.
+// The backslash has to be escaped before the quote, or a path ending in a backslash
+// would escape the closing quote and break out of the scalar.
+func yqString(s string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`)
+}
+
 // mountOverride renders one mount as a yq expression for limactl --set. The
 // expression appends to the existing list so the definition's own mounts are
 // preserved rather than replaced.
 func mountOverride(m Mount) string {
-	loc := strings.ReplaceAll(m.Location, `"`, `\"`)
-	point := strings.ReplaceAll(m.MountPoint, `"`, `\"`)
+	loc := yqString(m.Location)
+	point := yqString(m.MountPoint)
 	writable := "false"
 	if m.Writable {
 		writable = "true"
@@ -246,20 +315,55 @@ func (g Guest) Destroy() error {
 	return err
 }
 
-// Run executes a command in the guest and returns its combined output. The
-// command is passed as argv, never through a shell, so a workspace path or an
-// argument containing spaces or quotes cannot become a second command.
-func (g Guest) Run(argv []string, workdir string) (string, error) {
-	if len(argv) == 0 {
-		return "", errors.New("no command given")
-	}
+// shellArgs is the limactl argv that runs argv in the guest. Run and RunIO both go
+// through it so the two paths cannot drift apart.
+func (g Guest) shellArgs(argv []string, workdir string) []string {
 	args := []string{"shell", "--tty=false", g.Name}
 	if workdir != "" {
 		args = append(args, "--workdir", workdir)
 	}
 	args = append(args, "--")
-	args = append(args, argv...)
-	return g.run(args...)
+	return append(args, argv...)
+}
+
+// Run executes a command in the guest and returns its stdout. The command is
+// passed as argv, never through a shell, so a workspace path or an argument
+// containing spaces or quotes cannot become a second command.
+//
+// Use Run when the output is data the caller inspects; use RunIO when it is output
+// a human or an orchestrator is watching.
+func (g Guest) Run(argv []string, workdir string) (string, error) {
+	if len(argv) == 0 {
+		return "", errors.New("no command given")
+	}
+	return g.run(g.shellArgs(argv, workdir)...)
+}
+
+// RunIO runs argv in the guest with the caller's streams wired straight through.
+// Output is forwarded as it is produced rather than buffered until the command
+// exits, stdin reaches the guest command, and stderr keeps its own stream instead
+// of being folded into the error.
+//
+// The context cancels the guest command. Cancellation sends SIGTERM and only kills
+// after a grace period: CommandContext's default is an immediate SIGKILL, which
+// would deny a guest process the same chance to clean up that Ctrl-C in a terminal
+// gives it.
+func (g Guest) RunIO(ctx context.Context, argv []string, workdir string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if len(argv) == 0 {
+		return errors.New("no command given")
+	}
+	cmd := exec.CommandContext(ctx, g.binary(), g.shellArgs(argv, workdir)...)
+	cmd.Stdin = stdin
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = 10 * time.Second
+	if err := cmd.Run(); err != nil {
+		// No captured stderr: it went to the caller's stream. Wrap rather than
+		// format so errors.As can still recover the guest command's exit status.
+		return fmt.Errorf("limactl shell: %w", err)
+	}
+	return nil
 }
 
 // run invokes limactl and returns stdout. stderr is folded into the error so a
@@ -270,11 +374,13 @@ func (g Guest) run(args ...string) (string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		// %w keeps the *exec.ExitError reachable: the caller returns the guest
+		// command's own status instead of collapsing every failure to 1.
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
-			msg = err.Error()
+			return stdout.String(), fmt.Errorf("limactl %s: %w", args[0], err)
 		}
-		return stdout.String(), fmt.Errorf("limactl %s: %s", args[0], msg)
+		return stdout.String(), fmt.Errorf("limactl %s: %s: %w", args[0], msg, err)
 	}
 	return stdout.String(), nil
 }

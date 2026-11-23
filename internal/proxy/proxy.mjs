@@ -173,6 +173,20 @@ const modelRoutes = new Map([
   ["GET /models", "/models"],
   ["POST /chat/completions", "/chat/completions"],
 ]);
+
+// Joining a route path onto the upstream has to keep the upstream's own path
+// prefix. `new URL("/chat/completions", base)` treats an absolute path as
+// replacing the base path, so `--model-upstream https://api.example.com/v1` - the
+// documented form for a provider that is not served from the bare host - silently
+// dropped the /v1 and asked the provider's root for /chat/completions. A provider
+// whose API sits under a prefix answered 404 while a bare-host provider worked,
+// which made the failure look provider-specific.
+const joinUpstream = (base, routePath) => {
+  const upstream = new URL(base);
+  const target = new URL(upstream.origin);
+  target.pathname = `${upstream.pathname.replace(/\/$/, "")}${routePath}`;
+  return target;
+};
 // RFC 7230 hop-by-hop headers, meaningful to one connection only, so never
 // forwarded. `host` is deliberately not here: every route sets it from the
 // target, so a guest cannot choose which virtual host an allowlisted address
@@ -247,7 +261,7 @@ const handleModel = (request, response) => {
     return;
   }
 
-  const target = new URL(upstreamPath, modelUpstream);
+  const target = joinUpstream(modelUpstream, upstreamPath);
   const headers = stripHopByHop(request.headers);
   headers.host = target.host;
   headers.authorization = `Bearer ${modelKey}`;

@@ -256,9 +256,21 @@ const server = http.createServer(async (request, response) => {
       return;
     }
     issued.delete(task);
-    const revoked = await revoke(held.token);
-    console.error(`REVOKE task=${task} repo=${held.repo} revoked=${revoked}`);
-    reply(response, 204);
+    // Revoking is a network call, so it can fail. Un-guarded, the rejection escaped
+    // the handler and an unhandled rejection terminates the process - taking every
+    // other in-memory token with it, unreachable and therefore unrevokable. The
+    // token is already out of the map, so all that is left is to report it; the
+    // /revoke-all path below takes the same view.
+    try {
+      const revoked = await revoke(held.token);
+      console.error(`REVOKE task=${task} repo=${held.repo} revoked=${revoked}`);
+      reply(response, 204);
+    } catch (error) {
+      console.error(
+        `REVOKE task=${task} repo=${held.repo} failed: ${error.message}`,
+      );
+      reply(response, 502, { error: error.message });
+    }
     return;
   }
 

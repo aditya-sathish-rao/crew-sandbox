@@ -84,8 +84,26 @@ hardcoded. With no upstream the gateway is disabled and egress enforcement still
 runs.
 `
 
+// exitError carries a child process's exit status up to main.
+//
+// It is returned rather than exiting where the failure happens, because os.Exit
+// skips deferred cleanup: the temp directories cmdCheck, cmdBroker and cmdProxy
+// defer away are only removed if the command function returns normally. Exiting
+// from inside them left crew-gates-* and crew-proxy-* directories behind whenever
+// a gate or a service exited non-zero.
+type exitError struct{ code int }
+
+func (e exitError) Error() string { return fmt.Sprintf("exit status %d", e.code) }
+
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	err := run(os.Args[1:])
+	var exit exitError
+	switch {
+	case errors.As(err, &exit):
+		// The child already wrote its own diagnostics; a "crew-sandbox:" prefix
+		// here would misattribute them.
+		os.Exit(exit.code)
+	case err != nil:
 		fmt.Fprintf(os.Stderr, "crew-sandbox: %v\n", err)
 		os.Exit(1)
 	}
@@ -191,16 +209,16 @@ func cmdRun(ctx context.Context, args []string) error {
 		return err
 	}
 
-	out, err := g.Run(argv, f.workdir)
-	fmt.Print(out)
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			os.Exit(exitErr.ExitCode())
-		}
-		return err
+	// Untrusted work runs as the unprivileged agent account. The Lima user is the
+	// administration account and keeps passwordless sudo, so running the command as
+	// the Lima user would hand the guest's root to whatever the agent was asked to
+	// run. Every gate uses the same wrapper.
+	err = g.RunIO(ctx, lima.AsAgent(argv), f.workdir, os.Stdin, os.Stdout, os.Stderr)
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitError{code: exitErr.ExitCode()}
 	}
-	return nil
+	return err
 }
 
 func cmdUp(ctx context.Context, args []string) error {
@@ -408,7 +426,7 @@ func cmdProxy(ctx context.Context, args []string) error {
 		return err
 	}
 	if token, err := g.Run([]string{"sudo", "-n", "cat", "/etc/crew-model-token"}, ""); err == nil {
-		cfg.ModelToken = trimSpace(token)
+		cfg.ModelToken = strings.TrimSpace(token)
 	}
 
 	p, err := proxy.Command(ctx, cfg)
@@ -534,7 +552,8 @@ func secret(ctx context.Context, name string) (string, error) {
 }
 
 // runForeground runs a child process and waits for it, forwarding signals so a
-// Ctrl-C reaches the broker or proxy rather than orphaning it.
+// Ctrl-C reaches the broker or proxy rather than orphaning it, and returns its exit
+// status so the caller's deferred cleanup still runs.
 func runForeground(cmd *exec.Cmd) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -542,20 +561,9 @@ func runForeground(cmd *exec.Cmd) error {
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			os.Exit(exitErr.ExitCode())
+			return exitError{code: exitErr.ExitCode()}
 		}
 		return err
 	}
 	return nil
-}
-
-func trimSpace(s string) string {
-	start, end := 0, len(s)
-	for start < end && (s[start] == ' ' || s[start] == '\n' || s[start] == '\r' || s[start] == '\t') {
-		start++
-	}
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\n' || s[end-1] == '\r' || s[end-1] == '\t') {
-		end--
-	}
-	return s[start:end]
 }

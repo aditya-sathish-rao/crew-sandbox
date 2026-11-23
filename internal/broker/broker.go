@@ -57,8 +57,8 @@ type Process struct {
 }
 
 // Command builds the broker process without starting it. The staged files live in
-// a private temp directory that Cleanup removes, so the key's copy on disk does
-// not outlive the run.
+// a private temp directory that Cleanup removes. The private key is not one of
+// them: it reaches the broker through its environment and never touches disk.
 func Command(ctx context.Context, cfg Config) (*Process, error) {
 	if cfg.PrivateKey == "" {
 		return nil, ErrNoPrivateKey
