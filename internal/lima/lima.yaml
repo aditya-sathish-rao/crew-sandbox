@@ -51,8 +51,11 @@ provision:
   - mode: system
     script: |
       # The guest's model token authenticates it to the host gateway; it is not a
-      # model key. This runs before the marker below, so a VM created by an older
-      # definition gains a token on its next boot. It needs no network.
+      # model key. 0644 by design: the model client runs as `agent`, so every
+      # process in the guest can read it. It opens only the host gateway, and a
+      # recreated VM generates a new one. This runs before the marker below, so a
+      # VM created by an older definition gains a token on its next boot. It needs
+      # no network.
       if [ ! -s /etc/crew-model-token ]; then
         printf '%s' "$(openssl rand -hex 32)" >/etc/crew-model-token
         chown root:root /etc/crew-model-token
@@ -73,6 +76,8 @@ provision:
       id -u agent >/dev/null 2>&1 || useradd --create-home --shell /bin/bash agent
 
       # Single-user Nix for the agent user: no daemon, no root needed afterwards.
+      # That makes the store agent-owned and tamperable from inside the boundary;
+      # the pins stop drift, not tampering. See SECURITY.md §6.
       # The upstream installer script is a mutable URL, so the tarball is fetched
       # and verified directly against the hash that script itself pins.
       install -d -o agent -g agent -m 0755 /nix
@@ -116,17 +121,19 @@ provision:
           type filter hook output priority filter; policy drop;
           oif lo accept
           ct state established,related accept
-          # 3128 is the egress proxy, reached on the guest's gateway. It is the only
-          # port out. The token broker's 3129 is deliberately absent: it is an
-          # operator tool, and while it authenticates no caller a crewmate could
-          # mint itself a GitHub token. Reopen it only with the per-task secret that
-          # phase 4's spawn path injects, and assert it in checks/root.sh.
+          # 3128 is the egress proxy and 3130 is the model gateway, both reached on
+          # the guest's gateway. They are the only ports out. The token broker's
+          # 3129 is deliberately absent: it is an operator tool, and while it
+          # authenticates no caller a crewmate could mint itself a GitHub token.
+          # Reopen it only with the per-task secret that phase 4's spawn path
+          # injects, and assert it in checks/root.sh.
           ip daddr $gw tcp dport 3128 accept
+          ip daddr $gw tcp dport 3130 accept
         }
       }
       EOF
 
-      # Every login shell, for every user, finds the one door out. Derived from the
+      # Every login shell, for every user, finds the proxy. Derived from the
       # gateway at boot so a subnet change cannot leave tools pointed at nothing.
       cat >/etc/profile.d/crew-proxy.sh <<'PROXY'
       _crew_gw=$(ip -4 route show default | awk '{print $3; exit}')

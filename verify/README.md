@@ -11,9 +11,12 @@ so the gates that run are the gates that were built; this directory is where the
 written and reviewed, not where they are read from at run time.
 
 `nix flake check` does not run them. A Nix build has no VM and no network, which is most
-of what a gate needs; it covers the unit tests and the two `--selftest` runs instead.
+of what a gate needs; it covers the unit tests (including `node --check` on both `.mjs`),
+a prettier check, and the two `--selftest` runs instead.
 
-They run on the operator's own machine rather than in CI. No hosted runner can nest the
+The gates run on the operator's own machine rather than in CI; the flake checks and the
+package build are in CI ([`../.github/workflows/ci.yml`](../.github/workflows/ci.yml)).
+No hosted runner can nest the
 guest — GitHub's arm64 macOS runners cannot nest a Virtualization.framework VM, and the
 guest is arm64 — and the boundary they measure is that machine's. The README's
 "Where the gates run" has the full argument.

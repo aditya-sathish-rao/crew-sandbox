@@ -20,11 +20,15 @@ if (!appId) {
   process.exit(2);
 }
 if (!privateKey) {
-  console.error("crew-broker: GITHUB_APP_PRIVATE_KEY is required (it belongs in the vault)");
+  console.error(
+    "crew-broker: GITHUB_APP_PRIVATE_KEY is required (it belongs in the vault)",
+  );
   process.exit(2);
 }
 if (!reposFile) {
-  console.error("crew-broker: CREW_BROKER_REPOS_FILE is required; refusing to run without an allowlist");
+  console.error(
+    "crew-broker: CREW_BROKER_REPOS_FILE is required; refusing to run without an allowlist",
+  );
   process.exit(2);
 }
 
@@ -40,7 +44,9 @@ try {
   process.exit(2);
 }
 if (repos.length === 0) {
-  console.error(`crew-broker: ${reposFile} names no repositories; refusing to run with an empty allowlist`);
+  console.error(
+    `crew-broker: ${reposFile} names no repositories; refusing to run with an empty allowlist`,
+  );
   process.exit(2);
 }
 
@@ -48,18 +54,34 @@ if (repos.length === 0) {
 // half. Printing it lets an operator confirm the vault holds the key they think it
 // does without the key itself ever reaching a terminal.
 const keyFingerprint = () =>
-  `SHA256:${crypto.createHash("sha256").update(crypto.createPublicKey(privateKey).export({ type: "spki", format: "der" })).digest("base64")}`;
+  `SHA256:${crypto
+    .createHash("sha256")
+    .update(
+      crypto
+        .createPublicKey(privateKey)
+        .export({ type: "spki", format: "der" }),
+    )
+    .digest("base64")}`;
 
 const base64url = (input) =>
-  Buffer.from(input).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+  Buffer.from(input)
+    .toString("base64")
+    .replace(/=+$/, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
 
 // GitHub rejects an App JWT whose iat is in the future and refuses one older than
 // ten minutes, so the clock is deliberately skewed back a minute.
 const appJwt = () => {
   const now = Math.floor(Date.now() / 1000);
   const header = base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const payload = base64url(JSON.stringify({ iat: now - 60, exp: now + 540, iss: appId }));
-  const signature = crypto.createSign("RSA-SHA256").update(`${header}.${payload}`).sign(privateKey);
+  const payload = base64url(
+    JSON.stringify({ iat: now - 60, exp: now + 540, iss: appId }),
+  );
+  const signature = crypto
+    .createSign("RSA-SHA256")
+    .update(`${header}.${payload}`)
+    .sign(privateKey);
   return `${header}.${payload}.${base64url(signature)}`;
 };
 
@@ -73,7 +95,10 @@ const api = async (path, { method = "GET", body, authorization } = {}) => {
       authorization: authorization ?? `Bearer ${appJwt()}`,
     },
   });
-  const payload = response.status === 204 ? undefined : await response.json().catch(() => undefined);
+  const payload =
+    response.status === 204
+      ? undefined
+      : await response.json().catch(() => undefined);
   return { status: response.status, payload };
 };
 
@@ -87,24 +112,33 @@ const installationId = async () => {
     throw new Error(`installation lookup failed with ${status}`);
   }
   if (payload.length !== 1) {
-    throw new Error(`found ${payload.length} installations; set CREW_INSTALLATION_ID to pick one`);
+    throw new Error(
+      `found ${payload.length} installations; set CREW_INSTALLATION_ID to pick one`,
+    );
   }
   discovered = payload[0].id;
-  console.error(`crew-broker: installation ${discovered} on ${payload[0].account?.login ?? "?"}`);
+  console.error(
+    `crew-broker: installation ${discovered} on ${payload[0].account?.login ?? "?"}`,
+  );
   return discovered;
 };
 
 const mint = async (repo) => {
   const id = await installationId();
-  const { status, payload } = await api(`/app/installations/${id}/access_tokens`, {
-    method: "POST",
-    body: JSON.stringify({
-      repositories: [repo],
-      permissions: { contents: "write", pull_requests: "write" },
-    }),
-  });
+  const { status, payload } = await api(
+    `/app/installations/${id}/access_tokens`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        repositories: [repo],
+        permissions: { contents: "write", pull_requests: "write" },
+      }),
+    },
+  );
   if (status !== 201) {
-    throw new Error(`mint for ${repo} failed with ${status}: ${payload?.message ?? ""}`);
+    throw new Error(
+      `mint for ${repo} failed with ${status}: ${payload?.message ?? ""}`,
+    );
   }
   return { token: payload.token, expires_at: payload.expires_at };
 };
@@ -169,13 +203,21 @@ const server = http.createServer(async (request, response) => {
       return;
     }
     if (issued.has(task)) {
-      reply(response, 409, { error: `${task} already holds a token; revoke it first` });
+      reply(response, 409, {
+        error: `${task} already holds a token; revoke it first`,
+      });
       return;
     }
     try {
       const minted = await mint(repo);
-      issued.set(task, { token: minted.token, repo, expires_at: minted.expires_at });
-      console.error(`MINT task=${task} repo=${repo} expires=${minted.expires_at}`);
+      issued.set(task, {
+        token: minted.token,
+        repo,
+        expires_at: minted.expires_at,
+      });
+      console.error(
+        `MINT task=${task} repo=${repo} expires=${minted.expires_at}`,
+      );
       reply(response, 200, minted);
     } catch (error) {
       console.error(`FAIL task=${task} repo=${repo} ${error.message}`);
@@ -202,14 +244,35 @@ const server = http.createServer(async (request, response) => {
   // The kill switch: revoke every token this broker remembers, not just the one
   // task that asked. Tokens are memory-only, so a broker restart already strands
   // them; this makes the same thing deliberate and immediate.
+  //
+  // Revoke in parallel and settle every promise. Sequentially, a fleet's tokens
+  // can take longer to revoke than the caller's timeout, which reports failure
+  // while still revoking; one slow or failed request must not delay the rest.
   if (request.method === "POST" && route.pathname === "/revoke-all") {
-    const tasks = [...issued.keys()];
+    const tasks = [...issued.entries()];
+    // Take the snapshot out of the map first: a concurrent mint must not be swept
+    // after this response, and a failed revoke must not be retried here.
+    for (const [task] of tasks) issued.delete(task);
+    const results = await Promise.allSettled(
+      tasks.map(async ([task, held]) => ({
+        task,
+        held,
+        revoked: await revoke(held.token),
+      })),
+    );
     let revoked = 0;
-    for (const task of tasks) {
-      const held = issued.get(task);
-      issued.delete(task);
-      if (await revoke(held.token)) revoked += 1;
-      console.error(`REVOKE-ALL task=${task} repo=${held.repo}`);
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        const { task, held, revoked: ok } = result.value;
+        if (ok) revoked += 1;
+        console.error(
+          `REVOKE-ALL task=${task} repo=${held.repo} revoked=${ok}`,
+        );
+      } else {
+        console.error(
+          `REVOKE-ALL failed: ${result.reason?.message ?? result.reason}`,
+        );
+      }
     }
     reply(response, 200, { tasks: tasks.length, revoked });
     return;

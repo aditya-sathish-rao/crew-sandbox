@@ -50,8 +50,13 @@ type Config struct {
 	ModelKey string
 	// ModelToken is the guest's model token. Empty disables the model gateway.
 	ModelToken string
-	// Port is the listen port. Zero means 3128.
+	// Port is the listen port for the CONNECT and plain-HTTP egress proxy. Zero
+	// means 3128.
 	Port int
+	// ModelPort is the model gateway's own listen port. Zero means 3130. It is a
+	// separate listener from Port so the gateway, which holds the model key, and
+	// the egress proxy are never the same socket.
+	ModelPort int
 	// KeyHashPath, when set, receives the SHA-256 of the model key. The model gate
 	// compares that fingerprint against every value in the guest's environment, so
 	// it can prove the key is absent without the key ever reaching the guest.
@@ -107,7 +112,16 @@ func Command(ctx context.Context, cfg Config) (*Process, error) {
 	if port == 0 {
 		port = 3128
 	}
-	args := []string{scriptPath, "--listen", strconv.Itoa(port), "--allow", allowPath}
+	modelPort := cfg.ModelPort
+	if modelPort == 0 {
+		modelPort = 3130
+	}
+	args := []string{
+		scriptPath,
+		"--listen", strconv.Itoa(port),
+		"--model-listen", strconv.Itoa(modelPort),
+		"--allow", allowPath,
+	}
 	if cfg.Provider.Upstream != "" {
 		args = append(args, "--model-upstream", cfg.Provider.Upstream)
 	}

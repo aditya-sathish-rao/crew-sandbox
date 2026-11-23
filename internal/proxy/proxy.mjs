@@ -18,6 +18,10 @@ const flag = (name, fallback) => {
 };
 
 const port = Number(flag("--listen", "3128"));
+// The model gateway gets its own listener. Sharing the CONNECT proxy's port made
+// two unrelated trust decisions one socket; this way a bug in either route cannot
+// reach the other, and the firewall names each host service explicitly.
+const modelPort = Number(flag("--model-listen", "3130"));
 const allowFile = flag("--allow");
 // The upstream is a setting, not a constant. An empty value disables the model
 // gateway rather than defaulting to a vendor, so a proxy started without a
@@ -42,7 +46,9 @@ const modelKey = process.env.CREW_MODEL_KEY;
 const modelToken = process.env.CREW_MODEL_TOKEN;
 const modelReady = Boolean(modelKey && modelToken && modelUpstream);
 if (keyHashOut) {
-  const hash = modelKey ? crypto.createHash("sha256").update(modelKey).digest("hex") : "";
+  const hash = modelKey
+    ? crypto.createHash("sha256").update(modelKey).digest("hex")
+    : "";
   fs.writeFileSync(keyHashOut, `${hash}\n`);
 }
 
@@ -57,7 +63,9 @@ const rules = allowFile
 const isAllowedHost = (hostname) => {
   const host = hostname.toLowerCase().replace(/\.$/, "");
   return rules.some((rule) =>
-    rule.startsWith(".") ? host === rule.slice(1) || host.endsWith(rule) : host === rule,
+    rule.startsWith(".")
+      ? host === rule.slice(1) || host.endsWith(rule)
+      : host === rule,
   );
 };
 
@@ -66,7 +74,9 @@ const isAllowedHost = (hostname) => {
 const isAllowedPort = (portNumber) => portNumber === 443 || portNumber === 80;
 
 const log = (decision, target, from) =>
-  console.error(`${new Date().toISOString()} ${decision} ${target} from ${from}`);
+  console.error(
+    `${new Date().toISOString()} ${decision} ${target} from ${from}`,
+  );
 
 const splitTarget = (authority) => {
   const match = /^([a-z0-9.-]+)(?::(\d+))?$/i.exec(authority);
@@ -135,7 +145,11 @@ const parseClientHelloSni = (buffer) => {
       if (length < 5) return no("sni-malformed");
       const nameType = buffer[body + 2];
       const nameLength = buffer.readUInt16BE(body + 3);
-      if (nameType !== 0 || nameLength === 0 || body + 5 + nameLength > body + length) {
+      if (
+        nameType !== 0 ||
+        nameLength === 0 ||
+        body + 5 + nameLength > body + length
+      ) {
         return no("sni-malformed");
       }
       return {
@@ -149,11 +163,11 @@ const parseClientHelloSni = (buffer) => {
 };
 
 // The model gateway. The guest's model client points its provider at
-// http://host.lima.internal:3128/model, so the guest asks this route for
-// completions and the real key is added here, in the one host process that has it.
-// The route is closed unless both the vault key and the guest's token are present.
-// The upstream is whatever provider the operator configured; nothing here assumes
-// a vendor or a URL.
+// http://host.lima.internal:3130/model, a listener of its own rather than a path
+// on the CONNECT proxy. The real key is added here, in the one host process that
+// has it. The listener is not opened unless the vault key, the guest's token and
+// an upstream are all present. The upstream is whatever provider the operator
+// configured; nothing here assumes a vendor or a URL.
 const modelPrefix = "/model";
 const modelRoutes = new Map([
   ["GET /models", "/models"],
@@ -179,20 +193,30 @@ const hopByHop = new Set([
 const stripHopByHop = (headers) => {
   const out = { ...headers };
   if (typeof out.connection === "string") {
-    for (const name of out.connection.split(",")) delete out[name.trim().toLowerCase()];
+    for (const name of out.connection.split(","))
+      delete out[name.trim().toLowerCase()];
   }
   for (const name of hopByHop) delete out[name];
   return out;
 };
 
 const isModelRequest = (url) =>
-  url === modelPrefix || url.startsWith(`${modelPrefix}/`) || url.startsWith(`${modelPrefix}?`);
+  url === modelPrefix ||
+  url.startsWith(`${modelPrefix}/`) ||
+  url.startsWith(`${modelPrefix}?`);
 
 const tokenMatches = (header) => {
-  if (!modelToken || typeof header !== "string" || !header.startsWith("Bearer ")) return false;
+  if (
+    !modelToken ||
+    typeof header !== "string" ||
+    !header.startsWith("Bearer ")
+  )
+    return false;
   const given = Buffer.from(header.slice("Bearer ".length));
   const expected = Buffer.from(modelToken);
-  return given.length === expected.length && crypto.timingSafeEqual(given, expected);
+  return (
+    given.length === expected.length && crypto.timingSafeEqual(given, expected)
+  );
 };
 
 const replyJson = (response, status, payload) => {
@@ -247,7 +271,9 @@ const handleModel = (request, response) => {
       upstreamResponse.pipe(response);
     },
   );
-  upstream.setTimeout(15 * 60 * 1000, () => upstream.destroy(new Error("upstream timeout")));
+  upstream.setTimeout(15 * 60 * 1000, () =>
+    upstream.destroy(new Error("upstream timeout")),
+  );
   upstream.on("error", () => {
     if (response.headersSent) response.destroy();
     else replyJson(response, 502, { error: "model upstream failed" });
@@ -260,11 +286,6 @@ const handleModel = (request, response) => {
 };
 
 const server = http.createServer((req, res) => {
-  if (isModelRequest(req.url)) {
-    handleModel(req, res);
-    return;
-  }
-
   const from = req.socket.remoteAddress;
   let target;
   try {
@@ -307,6 +328,18 @@ const server = http.createServer((req, res) => {
   );
   upstream.on("error", () => res.writeHead(502).end());
   req.pipe(upstream);
+});
+
+// The gateway listens on its own port, so a request here can only be the model
+// route. Anything else is refused rather than treated as a proxied request: this
+// listener sits on the model key and must not become a second egress door.
+const modelServer = http.createServer((req, res) => {
+  if (isModelRequest(req.url)) {
+    handleModel(req, res);
+    return;
+  }
+  log("DENY", `model-path ${req.method} ${req.url}`, req.socket.remoteAddress);
+  replyJson(res, 404, { error: "not found" });
 });
 
 // tunnel: hand an already-validated first flight to the upstream and splice.
@@ -403,7 +436,12 @@ if (selftest) {
     if (sni) sniBody.writeUInt16BE(sniBody.length - 2, 0);
     const extensions = sni
       ? Buffer.concat([
-          Buffer.from([0x00, 0x00, (sniBody.length >> 8) & 0xff, sniBody.length & 0xff]),
+          Buffer.from([
+            0x00,
+            0x00,
+            (sniBody.length >> 8) & 0xff,
+            sniBody.length & 0xff,
+          ]),
           sniBody,
         ])
       : Buffer.alloc(0);
@@ -426,7 +464,13 @@ if (selftest) {
       body,
     ]);
     const record = Buffer.concat([
-      Buffer.from([0x16, 0x03, 0x01, (hello.length >> 8) & 0xff, hello.length & 0xff]),
+      Buffer.from([
+        0x16,
+        0x03,
+        0x01,
+        (hello.length >> 8) & 0xff,
+        hello.length & 0xff,
+      ]),
       hello,
     ]);
     return split ? record.subarray(0, 20) : record;
@@ -442,10 +486,26 @@ if (selftest) {
       { status: "ok", sni: "registry.npmjs.org" },
     ],
     ["no server_name", clientHello(null), { status: "ok", sni: null }],
-    ["a partial record", clientHello("a.example").subarray(0, 30), { status: "need" }],
-    ["a split record", clientHello("a.example", { split: true }), { status: "need" }],
-    ["plain http", Buffer.from("GET / HTTP/1.1\r\n"), { status: "no", reason: "not-tls" }],
-    ["a truncated hello", clientHello("a.example").subarray(0, 12), { status: "need" }],
+    [
+      "a partial record",
+      clientHello("a.example").subarray(0, 30),
+      { status: "need" },
+    ],
+    [
+      "a split record",
+      clientHello("a.example", { split: true }),
+      { status: "need" },
+    ],
+    [
+      "plain http",
+      Buffer.from("GET / HTTP/1.1\r\n"),
+      { status: "no", reason: "not-tls" },
+    ],
+    [
+      "a truncated hello",
+      clientHello("a.example").subarray(0, 12),
+      { status: "need" },
+    ],
     [
       "an extension block past the end",
       lyingExtensions,
@@ -460,21 +520,37 @@ if (selftest) {
       (want.sni === undefined || got.sni === want.sni) &&
       (want.reason === undefined || got.reason === want.reason);
     if (!match) ok = false;
-    console.error(`selftest: ${match ? "ok  " : "FAIL"} ${label} -> ${JSON.stringify(got)}`);
+    console.error(
+      `selftest: ${match ? "ok  " : "FAIL"} ${label} -> ${JSON.stringify(got)}`,
+    );
   }
   process.exit(ok ? 0 : 1);
 }
 
 server.listen(port, "127.0.0.1", () => {
-  const model = modelReady ? `${modelName} on ${modelUpstream}` : "disabled (no key, token, or upstream)";
   console.error(
-    `crew-proxy: listening on 127.0.0.1:${port} with ${rules.length} allowed hosts; model gateway ${model}`,
+    `crew-proxy: egress listening on 127.0.0.1:${port} with ${rules.length} allowed hosts`,
   );
 });
+
+if (modelReady) {
+  modelServer.on("error", (error) => {
+    console.error(
+      `crew-proxy: model gateway could not listen on 127.0.0.1:${modelPort}: ${error.message}`,
+    );
+    process.exit(1);
+  });
+  modelServer.listen(modelPort, "127.0.0.1", () => {
+    console.error(
+      `crew-proxy: model gateway ${modelName} listening on 127.0.0.1:${modelPort} -> ${modelUpstream}`,
+    );
+  });
+}
 
 for (const signal of ["SIGTERM", "SIGINT"]) {
   process.on(signal, () => {
     server.close();
+    if (modelServer.listening) modelServer.close();
     process.exit(0);
   });
 }

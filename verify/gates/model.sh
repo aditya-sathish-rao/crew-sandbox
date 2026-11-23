@@ -14,7 +14,7 @@ flunk() {
 # configured. Never counted as a pass.
 skip() { printf 'SKIP  %s (%s)\n' "$1" "$2"; }
 
-gateway="http://host.lima.internal:3128/model"
+gateway="http://host.lima.internal:3130/model"
 token_file=/etc/crew-model-token
 models="$HOME/.pi/agent/models.json"
 settings="$HOME/.pi/agent/settings.json"
@@ -58,12 +58,12 @@ fi
 
 # A missing file is the guest configuration not having been applied, which is worth
 # saying: the boundary is intact and the fleet has nowhere to point.
-missing() { flunk "$1 (no ${2}; apply the guest configuration)"; }
+missing() { flunk "$1 (no ${2}; apply the guest configuration — see README, 'Applying it to the guest')"; }
 
 if [[ ! -f "$models" ]]; then
   missing "the model client's provider points at the gateway" "$models"
   missing "the model client reads its gateway token from the guest file" "$models"
-elif grep -q 'host.lima.internal:3128/model' "$models"; then
+elif grep -q 'host.lima.internal:3130/model' "$models"; then
   pass "the model client's provider points at the gateway"
 else
   flunk "the model client's provider points at the gateway"
@@ -92,6 +92,8 @@ fi
 code=$(curl --noproxy '*' -sS -m 10 -o /dev/null -w '%{http_code}' "$gateway/models" 2>/dev/null || echo 000)
 if [[ "$code" == 401 ]]; then
   pass "the gateway refuses a request without a token"
+elif [[ "$code" == 000 ]]; then
+  flunk "the gateway refuses a request without a token (unreachable; re-create the guest so the firewall admits 3130)"
 else
   flunk "the gateway refuses a request without a token (got ${code})"
 fi

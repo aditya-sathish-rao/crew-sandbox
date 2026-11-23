@@ -147,7 +147,7 @@ push() {
 # the way out by design; everything else is a service the operator runs.
 reach_host_services() {
   local port open=""
-  for port in 22 80 3000 3129 5432 8080 8888; do
+  for port in 22 80 3000 3129 3130 5432 8080 8888; do
     if timeout 2 bash -c ": >/dev/tcp/${gateway}/${port}" 2>/dev/null; then
       open="$open $port"
     fi
@@ -155,7 +155,7 @@ reach_host_services() {
   if [[ -n "$open" ]]; then
     record ESCAPED reach-host-services "connected to${open} on ${gateway}"
   else
-    record BLOCKED reach-host-services "nothing on ${gateway} accepts a connection except the proxy port"
+    record BLOCKED reach-host-services "nothing on ${gateway} accepts a connection except the proxy and model-gateway ports"
   fi
 }
 

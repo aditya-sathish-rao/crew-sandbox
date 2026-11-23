@@ -7,6 +7,7 @@
   curl,
   jq,
   coreutils,
+  lsof,
   makeWrapper,
 }:
 buildGoModule {
@@ -22,10 +23,11 @@ buildGoModule {
   # them onto PATH keeps the binary honest without baking absolute store paths into
   # the Go source.
   #
-  # curl, jq and coreutils are for the verification gates, which are bash scripts
-  # this binary carries: they probe the running guest and the host services, so they
-  # need the same tools on the operator's PATH that they would have had as a
-  # separate package.
+  # curl, jq, coreutils and lsof are for the verification gates, which are bash
+  # scripts this binary carries: they probe the running guest and the host
+  # services, so they need the same tools on the operator's PATH that they would
+  # have had as a separate package. `lsof` in particular is what proves a listener
+  # is gone and that a guest listener did not surface on the host's loopback.
   nativeBuildInputs = [ makeWrapper ];
 
   postInstall = ''
@@ -37,6 +39,7 @@ buildGoModule {
           curl
           jq
           coreutils
+          lsof
         ]
       }
   '';

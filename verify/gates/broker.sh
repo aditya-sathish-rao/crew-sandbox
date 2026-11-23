@@ -182,7 +182,10 @@ case "$code" in
     ;;
 esac
 
-# 3. The token is refused a different repository entirely.
+# 3. The token is refused a different repository entirely. Only a 403 proves the
+# token was scoped: a 404 means the repository is not accessible to the App at all
+# (not installed, or not visible), which says nothing about scoping. The operator
+# must pass a repository the App is installed on but this token is not scoped to.
 other=${CREW_BROKER_OTHER_REPO:-}
 if [[ "$other" == "$full" ]]; then
   flunk "the gate has a different repository to test"
@@ -190,8 +193,8 @@ else
   code=$(gh_api PUT "/repos/${other}/contents/${probe_path}" "$body" \
     -H 'content-type: application/json' \
     -d "$(printf '{"message":"crew gate probe","content":"%s"}' "$probe_content")")
-  if [[ "$code" == 403 || "$code" == 404 || "$code" == 401 ]]; then
-    pass "GitHub refuses the token a write on another repository (${code})"
+  if [[ "$code" == 403 ]]; then
+    pass "GitHub refuses the token a write on another repository (403)"
   elif [[ "$code" == 200 || "$code" == 201 ]]; then
     flunk "GitHub refuses the token a write on another repository (it created a file)"
     sha=$(jq -r '.content.sha // empty' "$body")
@@ -200,6 +203,8 @@ else
         -H 'content-type: application/json' \
         -d "$(printf '{"message":"crew gate probe cleanup","sha":"%s"}' "$sha")" >/dev/null
     fi
+  elif [[ "$code" == 404 || "$code" == 401 ]]; then
+    flunk "GitHub refuses the token a write on another repository (got ${code}; pass a repository the App is installed on)"
   else
     flunk "GitHub refuses the token a write on another repository (got ${code})"
   fi

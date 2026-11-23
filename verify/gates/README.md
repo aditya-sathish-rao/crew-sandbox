@@ -11,7 +11,7 @@ observe. The rest are the assertions.
 | --- | --- | --- | --- |
 | `guest` | `guest.sh` | `agent` in the guest | no host mount, default-deny egress, no sudo, no readable firewall |
 | `root` | `root.sh` | root in the guest | the ruleset, sudoers, the gate directory, the closed broker port |
-| `toolchain` | `toolchain.sh` | `agent`, login shell | the fleet resolves under `/nix/store` and the store verifies |
+| `toolchain` | `toolchain.sh` | `agent`, login shell | the tools named by `--expected-tools` resolve under `/nix/store` (location only); the store has no registration errors |
 | `proxy` | `proxy.sh` | `agent` in the guest | the allowlist names hosts; SNI and `Host` cannot be retargeted |
 | `model` | `model.sh` | `agent` in the guest | no credential in the guest; the gateway holds the key |
 | `broker` | `broker.sh` | the host | a token is minted per task, sees one repository, and is refused the default branch |
@@ -25,7 +25,7 @@ The gate is told what it cannot know. None of this is a property of this reposit
 | the model provider's base URL | `--model-upstream URL` | `model` |
 | the vault secret holding the model key | `--model-key-env NAME` | `model` |
 | the GitHub App ID | `--app-id ID` | `broker` |
-| a repository the App is not installed on | `--other-repo OWNER/NAME` | `broker` |
+| a repository the App is installed on (not the one being minted) | `--other-repo OWNER/NAME` | `broker` |
 | the allowlists | `--egress-allow FILE`, `--repos-allow FILE` | `proxy`, `model`, `broker` |
 
 A phase whose input is missing fails with the reason rather than passing over an

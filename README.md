@@ -12,7 +12,9 @@ be versioned, reviewed and tested on its own.
 **Status: core, guest config and gates ported.** The CLI, the VM definition, the token broker,
 the egress proxy, the guest's home-manager configuration and the phase gates are here. The
 gates need a running guest and the operator's secrets; a phase whose inputs are missing fails
-with the reason rather than reporting a pass.
+with the reason rather than reporting a pass. Phase 0's host settings and the fleet's tools
+are not: the guest module is deliberately empty, a consumer supplies the fleet, and the
+host-side `darwinModules.default` is still to be written.
 
 ## Why the boundary exists
 
@@ -30,8 +32,9 @@ Concretely, the boundary is four things:
 - **A VM with `mounts: []`.** No host directory is mounted unless `--workspace` is given, so
   `/Users` does not exist inside the guest. A workspace mount is opt-in per run and read-only
   unless `--writable` is passed.
-- **An nftables default-deny.** All input and output is dropped except loopback and the proxy
-  port on the host gateway. The broker's port is deliberately not opened.
+- **An nftables default-deny.** All input and output is dropped except loopback and the
+  egress proxy and model-gateway ports on the host gateway. The broker's port is
+  deliberately not opened.
 - **A host proxy that names hosts.** It admits only the hostnames in the egress allowlist
   (`internal/allowlist/egress-allow.example` unless `--egress-allow` supplies one), and it
   reads the TLS handshake so an allowlisted CDN address cannot reach another site behind it.
@@ -83,14 +86,34 @@ the guest gets exactly those and a shell:
 The username and home directory are not options: `nix/guest/` fixes them to the `agent`
 account `lima.yaml` creates, and activation fails anywhere else.
 
+### Applying it to the guest
+
+The module is exported, not installed. The guest has no host mount, so the consumer
+applies its own pinned `agent@aarch64-linux` generation from inside the VM, as `agent`.
+A login shell already carries the proxy, so flake inputs are fetched through the
+allowlisted door. For example, with the consumer's flake published at `OWNER/REPO`:
+
+```console
+$ limactl shell crew-sandbox -- sudo -n -u agent -H bash -lc \
+    'nix run github:nix-community/home-manager/release-26.05 -- \
+       switch --flake github:OWNER/REPO#agent@aarch64-linux'
+```
+
+A local checkout can be copied in with `limactl copy -r` and referenced by path instead.
+There is deliberately no `crew-sandbox apply`: this repository carries no fleet and no
+flake reference to switch. `crew-sandbox check model` fails until the activation has
+produced `~/.pi/agent/models.json` and `settings.json`, which is the closest thing to a
+check that the generation landed.
+
 ## Development
 
 ```console
 $ nix flake show          # evaluates the flake
-$ nix develop             # git, go, jq, lima, nixfmt, nodejs
+$ nix develop             # git, go, jq, lima, nixfmt, nodejs, prettier
 $ nix build               # builds the CLI
-$ nix flake check         # runs the unit tests and the two selftests
+$ nix flake check         # unit tests, selftests, prettier, guest config
 $ nix fmt                 # format the Nix sources
+$ prettier --check internal/*/*.mjs  # the two ported scripts
 $ shellcheck verify/*/*.sh  # lint the gates and the red-team script
 ```
 
@@ -108,7 +131,7 @@ built:
 ```console
 $ crew-sandbox check guest      # no mount, no sudo, default-deny egress, no host forward
 $ crew-sandbox check root       # the ruleset, sudoers and the gate directory
-$ crew-sandbox check toolchain  # the fleet resolves under /nix/store
+$ crew-sandbox check toolchain  # the tools named by --expected-tools resolve under /nix/store
 $ crew-sandbox check proxy      # the allowlist names hosts, not addresses
 $ crew-sandbox check model      # the key stays on the host
 $ crew-sandbox check broker     # one repo, one token, revoked at teardown
@@ -174,7 +197,7 @@ PASS  the workspace is the only host directory mounted, read-only
 PASS  egress to an arbitrary host is blocked
 PASS  a query to an arbitrary resolver is blocked
 PASS  the system resolver cannot resolve
-PASS  the host is unreachable on any port but the proxy
+PASS  the host is unreachable on a port the boundary did not open
 PASS  sudo is unavailable
 PASS  the firewall cannot be flushed
 PASS  the firewall ruleset cannot be read
@@ -208,8 +231,9 @@ says which flag it wanted and fails — it does not pass over an assertion it co
 
 Nothing above is part of `nix flake check`. A Nix build has no VM and no network, so the
 gates only run from `crew-sandbox check`. What `nix flake check` covers is what a build
-can prove: the vault chain, the mount rendering, every embedded script parsing, an
-evaluation of the guest configuration, and the proxy's and broker's own `--selftest`:
+can prove: the vault chain, the mount rendering, every embedded script parsing —
+including both `.mjs` files with `node --check` — a prettier check on those two files,
+an evaluation of the guest configuration, and the proxy's and broker's own `--selftest`:
 
 ```console
 $ crew-sandbox proxy --selftest    # 7 ClientHello parser cases
@@ -218,8 +242,8 @@ $ crew-sandbox broker --selftest   # JWT signing against the configured key
 
 ### Where the gates run
 
-On the operator's machine, against the operator's guest. They are not wired into CI, and a
-self-hosted runner is not worth it yet, for three reasons:
+The gates run on the operator's machine, against the operator's guest. They are not wired
+into CI, and a self-hosted runner is not worth it yet, for three reasons:
 
 - **No hosted runner can run them.** The guest is `vmType: vz`, which is Apple's
   Virtualization.framework, and a GitHub-hosted macOS runner is itself a machine virtualized
@@ -236,8 +260,10 @@ self-hosted runner is not worth it yet, for three reasons:
   `broker` mints a live GitHub App token, writes an agent branch and revokes. Handing those
   to a runner adds a credential surface where the tool exists to remove one.
 
-`nix flake check` is what a runner could do, and what CI would run if it were added: unit
-tests and the two selftests, with no VM and no network.
+`nix flake check` and the operator binary build *are* wired into CI:
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `nix build .#crew-sandbox` and
+`nix flake check` on an arm64 macOS runner — unit tests, both selftests, prettier, and the
+guest-configuration evaluation, with no VM and no network. The gates above are not.
 
 A self-hosted runner on a spare Mac is the only way to run the gates in CI. It becomes worth
 arguing for when someone other than the operator needs the result — and it would mean that

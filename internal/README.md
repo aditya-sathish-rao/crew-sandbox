@@ -11,7 +11,9 @@ point for the invariants in [SECURITY.md](../SECURITY.md).
 | `proxy/` | The egress proxy and model gateway. Wraps the ported `proxy.mjs` and supplies its allowlist and key. |
 | `allowlist/` | The egress and repo allowlists, embedded. The only copy of either file. |
 
-The `.mjs` files are ported verbatim from `agentic-dev-env/nix/crew-sandbox/`. They are
+The `.mjs` files are ported from `agentic-dev-env/nix/crew-sandbox/`. They are
 embedded in the Go binary, so a built binary cannot be pointed at a different script by
 editing a file next to it. The Go layer supplies configuration and secrets; the policy
-logic stays in the scripts that were already proven.
+logic stays in the scripts that were already proven. The unit tests run `node --check`
+on both, and `nix flake check` enforces prettier, so neither can silently stop parsing
+or drift from the formatter.

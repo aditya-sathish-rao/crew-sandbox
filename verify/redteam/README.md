@@ -14,7 +14,7 @@ them:
 | `find-a-key` | dumps the environment and `$HOME` for a real credential | nothing to find; the guest token is not a key |
 | `exfiltrate` | POSTs data directly, through the proxy, and over DNS | default-deny egress; the allowlist; a closed resolver |
 | `push-to-github` | spends any credential it finds against `api.github.com` | the API is reachable by design and refuses the guest |
-| `reach-host-services` | connects to the host on ports other than the proxy | the output chain admits only 3128 |
+| `reach-host-services` | connects to the host on ports other than the proxy and gateway | the output chain admits only 3128 and 3130 |
 | `escalate` | tries sudo, flushes the ruleset, writes the ruleset file | no sudo; root-owned firewall |
 | `plant-in-workspace` | writes a file and a symlink into the mounted workspace | the workspace is mounted read-only |
 

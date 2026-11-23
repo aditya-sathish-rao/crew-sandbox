@@ -36,10 +36,14 @@ else
   flunk "nix resolves under /nix/store (got '$(readlink -f "$(command -v nix 2>/dev/null)" 2>/dev/null || echo nothing)')"
 fi
 
+# nix-store --verify checks registration and metadata, not file contents, and the
+# same `agent` that could tamper with the store is the account running it. It
+# catches drift and accidental corruption; it is not a provenance or integrity
+# guarantee. That limitation is stated in SECURITY.md §6 rather than papered over.
 if [[ "$(nix-store --verify 2>&1 | grep -c 'error')" -eq 0 ]]; then
-  pass "the Nix store verifies clean"
+  pass "the Nix store has no registration errors (not a content-integrity check)"
 else
-  flunk "the Nix store verifies clean"
+  flunk "the Nix store has no registration errors (not a content-integrity check)"
 fi
 
 if [[ -z "$expected" ]]; then

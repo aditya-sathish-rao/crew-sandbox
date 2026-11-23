@@ -34,8 +34,9 @@
       });
 
       # Only what a build can prove with no VM and no network: the Go unit tests
-      # (which include every embedded script parsing), the proxy's and the broker's
-      # own --selftest, and an evaluation of the exported guest configuration.
+      # (which include every embedded script parsing, including the two .mjs),
+      # the proxy's and the broker's own --selftest, prettier on both scripts, and
+      # an evaluation of the exported guest configuration.
       #
       # The gates are not here. They assert on a guest as it is right now, which
       # needs a running VM, the operator's secrets and outbound network, so
@@ -46,6 +47,16 @@
           crew-sandbox = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
           guest = pkgs.callPackage ./nix/checks/guest.nix { inherit nixpkgs home-manager; };
         };
+        # A syntax error in a .mjs costs a live proxy, and an unformatted one is a
+        # review blind spot. The unit tests run `node --check`; this enforces the
+        # style without needing a network or a VM.
+        formatting = pkgs.runCommand "crew-sandbox-formatting" { nativeBuildInputs = [ pkgs.prettier ]; } ''
+          export HOME=$TMPDIR
+          prettier --check --no-cache \
+            ${./internal/proxy/proxy.mjs} \
+            ${./internal/broker/broker.mjs}
+          mkdir -p $out
+        '';
       });
 
       devShells = forAllSystems (pkgs: {
@@ -57,6 +68,7 @@
             lima
             nixfmt
             nodejs
+            prettier
             shellcheck
           ];
         };

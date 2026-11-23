@@ -68,7 +68,7 @@ fi
 expect_fail "egress to an arbitrary host is blocked" curl -sS -m 5 -o /dev/null https://example.com
 expect_fail "a query to an arbitrary resolver is blocked" dig +time=2 +tries=1 @1.1.1.1 example.com
 expect_fail "the system resolver cannot resolve" getent hosts example.com
-expect_fail "the host is unreachable on any port but the proxy" curl -sS -m 3 -o /dev/null \
+expect_fail "the host is unreachable on a port the boundary did not open" curl -sS -m 3 -o /dev/null \
   "http://$(ip -4 route show default | awk '{print $3; exit}'):80"
 expect_fail "sudo is unavailable" sudo -n true
 expect_fail "the firewall cannot be flushed" nft flush ruleset

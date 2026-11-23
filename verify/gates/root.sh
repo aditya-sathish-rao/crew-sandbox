@@ -24,14 +24,15 @@ else
   flunk "input and output both default to drop (found $drops)"
 fi
 
-# 3128 is the only way out. The broker's port is an operator tool: while it
+# 3128 is the egress proxy and 3130 is the model gateway; both are host services
+# the guest is meant to reach. The broker's port is an operator tool: while it
 # authenticates no caller, a reachable broker lets anything in the guest mint
 # itself a GitHub token, so it must stay closed.
 ports=$(nft list chain inet crew output | grep -oE 'dport [0-9]+ accept' | awk '{print $2}' | sort -u | tr '\n' ' ')
-if [[ "$ports" == "3128 " ]]; then
-  pass "the only reachable host port is the egress proxy (${ports% })"
+if [[ "$ports" == "3128 3130 " ]]; then
+  pass "the only reachable host ports are the egress proxy and the model gateway (${ports% })"
 else
-  flunk "the only reachable host port is the egress proxy (got '${ports}')"
+  flunk "the only reachable host ports are the egress proxy and the model gateway (got '${ports}')"
 fi
 
 if [[ "$ports" == *"3129"* ]]; then

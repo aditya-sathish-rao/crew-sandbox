@@ -34,6 +34,9 @@ other_repo=${CREW_BROKER_OTHER_REPO:-}
 # Not 3129: the gate controls the key the broker runs with, so it must not share a
 # listener with a broker the operator already has running.
 broker_port=${CREW_BROKER_PORT:-3139}
+# The model gateway listens on its own port. The gate controls the key, so it must
+# not share the egress proxy's socket or a gateway the operator already has running.
+model_port=${CREW_MODEL_PORT:-3130}
 
 # The gate directory. Owned by root, group-writable by the Lima admin account so
 # `limactl copy` can stage into it, and not writable by `agent`. Copying into
@@ -420,9 +423,10 @@ phase_model() {
     return 1
   fi
   build_proxy_args
-  proxy_args+=(--port 3128 --model-upstream "$model_upstream" --model-key-env "$model_key_env")
-  if lsof -nP -iTCP:3128 -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "model: port 3128 is already in use; stop that proxy so this gate controls the key." >&2
+  proxy_args+=(--port 3128 --model-port "$model_port" --model-upstream "$model_upstream" --model-key-env "$model_key_env")
+  if lsof -nP -iTCP:3128 -sTCP:LISTEN >/dev/null 2>&1 ||
+    lsof -nP -iTCP:"$model_port" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "model: port 3128 or ${model_port} is already in use; stop that service so this gate controls the key." >&2
     return 1
   fi
   key_hash_file=$(mktemp)
@@ -430,10 +434,12 @@ phase_model() {
   echo "model: approve the vault prompt if one appears"
   "$self" "${proxy_args[@]}" --key-hash-out "$key_hash_file" >/dev/null 2>&1 &
   service_pid=$!
-  service_ports+=(3128)
+  service_ports+=(3128 "$model_port")
   local _i
   for _i in {1..600}; do
-    if [[ -s "$key_hash_file" ]] && lsof -nP -iTCP:3128 -sTCP:LISTEN >/dev/null 2>&1; then
+    if [[ -s "$key_hash_file" ]] &&
+      lsof -nP -iTCP:3128 -sTCP:LISTEN >/dev/null 2>&1 &&
+      lsof -nP -iTCP:"$model_port" -sTCP:LISTEN >/dev/null 2>&1; then
       break
     fi
     if ! kill -0 "$service_pid" 2>/dev/null; then
@@ -445,8 +451,9 @@ phase_model() {
     echo "model: the vault returned no $model_key_env, so there is no key to prove stays home." >&2
     return 1
   fi
-  if ! lsof -nP -iTCP:3128 -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "model: the proxy did not start." >&2
+  if ! lsof -nP -iTCP:3128 -sTCP:LISTEN >/dev/null 2>&1 ||
+    ! lsof -nP -iTCP:"$model_port" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "model: the proxy did not start both listeners (3128, ${model_port})." >&2
     return 1
   fi
   local rc=0
@@ -466,8 +473,10 @@ phase_model() {
   # Stop the keyed proxy here rather than leaving it to the EXIT trap: the broker
   # gate starts its own service and overwrites service_pid, so a later phase would
   # orphan this listener and the next run would fail on "port 3128 is already in
-  # use". Each phase owns the service it started.
+  # use". Each phase owns the service it started. The one process holds both
+  # listeners, so stopping either port releases both.
   stop_service 3128
+  stop_service "$model_port"
   return "$rc"
 }
 
@@ -480,7 +489,7 @@ phase_broker() {
   fi
   if [[ -z "$other_repo" ]]; then
     echo "broker: no second repository is configured to test the token against." >&2
-    echo "broker: pass --other-repo owner/name, one this App is not installed on." >&2
+    echo "broker: pass --other-repo owner/name, one this App is installed on but the token should not reach." >&2
     return 1
   fi
   if lsof -nP -iTCP:"$broker_port" -sTCP:LISTEN >/dev/null 2>&1; then

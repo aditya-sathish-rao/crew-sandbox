@@ -56,14 +56,15 @@ creation time, so asking for a workspace on an existing VM is refused rather tha
 silently ignored — running the command without the workspace would be a quiet lie
 about what the guest can see.
 
-### 3.3 Egress is default-deny, with one door
+### 3.3 Egress is default-deny, with two named doors
 
 The guest's nftables ruleset drops all input and output except loopback and
-established connections. The only outbound rule is the proxy port on the host
-gateway:
+established connections. The only outbound rules are the egress proxy and the model
+gateway on the host gateway:
 
 ```
 ip daddr $gw tcp dport 3128 accept
+ip daddr $gw tcp dport 3130 accept
 ```
 
 The broker's port 3129 is deliberately absent. The broker authenticates no caller,
@@ -86,9 +87,14 @@ allowlist mean what it says:
   TLS, so without this check an allowlisted CDN address would reach any site
   behind that CDN. A malformed handshake costs one tunnel, not the process.
 
-The model gateway is a separate route on the same proxy. It holds the model key and
-replaces the `Authorization` header, so the guest's model client reaches the provider
-without ever holding the key. The route is closed unless a key is configured.
+The model gateway is a separate listener on 127.0.0.1:3130, not a route on the
+CONNECT proxy. It holds the model key and replaces the `Authorization` header, so the
+guest's model client reaches the provider without ever holding the key. The listener
+is not opened unless the key, the guest's token and an upstream are all configured.
+Keeping it off the proxy's socket means a bug in either route cannot expose the
+other, and the guest firewall names both ports explicitly. A client that routes the
+gateway through the proxy is still refused, which is why every login shell sets
+`no_proxy=host.lima.internal`.
 
 The gateway is provider-agnostic. The upstream URL and the secret name are settings,
 not constants, so the same gateway serves any provider and no vendor is hardcoded.
@@ -97,11 +103,16 @@ With no upstream configured the gateway is disabled and the vault is not consult
 ### 3.5 Credentials are brokered, never handed over
 
 The broker mints GitHub App installation tokens scoped to one repository and one
-task. Tokens are memory-only: a restart strands them. The private key stays in the
-vault and is passed to the broker's child process through its environment, never
-argv. The model key stays in the proxy. The guest's own model token is a random
-value generated at first boot and readable only inside the guest; it identifies the
-guest to the proxy and is not a credential to anything else.
+task. Tokens are memory-only: a restart strands them. `crew-sandbox down` stops the
+guest first and then asks the broker to revoke every token it remembers, even when
+the stop fails; a broker that is not running has none to revoke. The private key
+stays in the vault and is passed to the broker's child process through its
+environment, never argv. The model key stays in the proxy. The guest's own model
+token is a random value generated at first boot and stored `root:root 0644`, so
+every process in the guest can read it by design: the model client runs as `agent`.
+It authenticates the guest to the host gateway and is not a credential to anything
+else. Destroying and recreating the VM writes a new one; `up` on an existing VM does
+not rotate it.
 
 ### 3.6 Privilege is reduced by construction
 
@@ -127,14 +138,14 @@ binary, so the gates that run are the gates that were built.
 | Invariant | Phase | What it asserts |
 | --- | --- | --- |
 | 3.2 no host mount | `guest` | `/Users` absent; no 9p or virtiofs mount |
-| 3.3 default-deny egress | `guest` | arbitrary host, arbitrary resolver, and the host on any port but 3128 all fail |
+| 3.3 default-deny egress | `guest` | arbitrary host, arbitrary resolver, and the host on any port but 3128 and 3130 all fail |
 | 3.3 broker port closed | `root` | the token broker is not reachable from the guest |
 | 3.4 allowlist names hosts | `proxy` | allowlisted host answers; a host off the allowlist is refused over https and http; a spoofed `Host` cannot retarget a plain-HTTP request; a tunnel whose SNI names another host is refused; CONNECT is refused on port 80 |
 | 3.5 no credential in the guest | `model` | no environment value is the model key; the gateway token is not a model key; the gateway refuses a wrong token and a path outside the model route |
 | 3.6 reduced privilege | `guest`, `root` | sudo unavailable; ruleset not readable, not flushable, not writable; `agent` in no privileged group and in no sudoers rule |
 | 3.7 no host forwarding | `guest` | a guest listener on 0.0.0.0 and on 127.0.0.1 stays off the host |
 | 3.5 broker mints per task | `broker` | a repository outside the allowlist is refused before minting; a minted token sees only its own repository, cannot write the default branch, and stops working after a revoke |
-| the fleet is installed | `toolchain` | `nix` resolves under `/nix/store` and the store verifies |
+| the fleet's tools resolve from the store | `toolchain` | `nix` resolves under `/nix/store`, and the store has no registration errors (a location check, not content integrity) |
 | all of the above, adversarially | `redteam` | seven scripted attacks — host filesystem, credentials, exfiltration, pushes, host services, sudo, planted hooks — each blocked with the evidence printed |
 
 `check all` runs every phase in one process, because a boundary that holds in isolation
@@ -153,7 +164,8 @@ one was found.
 
 The proxy and broker each carry a `--selftest` that runs without a VM: seven
 ClientHello parser cases for the proxy, and the signing path for the broker. Those are
-what `nix flake check` runs, along with the unit tests; the gates above are not, because
+what `nix flake check` runs, along with the unit tests (which include `node --check` on
+both scripts) and a prettier check; the gates above are not, because
 a Nix build has no VM and no network.
 
 ## 5. Failures found during development
@@ -184,6 +196,33 @@ on tmpfs and treating a failed copy as a named tampering failure.
 - **Everything runs in one guest.** Commands share the same kernel boundary and are
   not separated from each other. A compromise of one is contained by the VM, but not
   from the others inside it.
+- **The Nix store is owned by the agent.** The guest uses single-user Nix, so `/nix`
+  and `/nix/store` belong to `agent` and a crewmate can replace the very tools it
+  runs. The `toolchain` gate proves each tool *resolves under* `/nix/store`, and
+  `nix-store --verify` checks registration and metadata, not file contents — and the
+  agent runs both itself, so neither is a provenance or integrity guarantee. The pins
+  stop *drift* (the guest and the host agree on what to install), not tampering from
+  inside the boundary. The blast radius is the guest, which is already the untrusted
+  side; a root-owned store with a daemon would be needed to make this an integrity
+  boundary, and that contradicts the "no root afterwards" design.
+- **Phase 0 is not implemented here.** The plan's headless-host phase — never sleep,
+  restart after a power cut, autologin — is host configuration this repository does
+  not write; the `darwinModules.default` host module described in `nix/modules/` is
+  not built yet. Until the operator's host configuration sets those, Phase 0's own
+  gate (cut the power, come back) cannot be attempted.
+- **Phase 4's fleet is the consumer's.** The guest module installs no tools and sets
+  no git identity. A consumer supplies herdr, firstmate and the rest through
+  `extraPackages`, and `crew-sandbox check toolchain --expected-tools …` asserts only
+  that those names resolve under `/nix/store`. A guest with no fleet still passes
+  every boundary gate, because the boundary does not depend on the fleet — so a
+  passing `check toolchain` is not evidence that the fleet is installed.
+- **Nothing applies the guest configuration for you.** This repository exports
+  `homeManagerModules.default`; it does not run `home-manager switch`. Lima fixes
+  mounts at creation and the guest has no host mount, so the consumer applies its own
+  pinned `agent@aarch64-linux` generation from inside the guest, as `agent` — see the
+  README's "Applying it to the guest". There is no `crew-sandbox apply` command. The
+  `model` gate fails until `~/.pi/agent/models.json` and `settings.json` exist, which
+  only a successful activation produces; it does not compare generation identities.
 - **A CONNECT proxy cannot see inside TLS.** The guarantee is "only allowlisted
   hostnames", not "only their ordinary traffic". A client that skips certificate
   validation can present an allowed SNI and talk to whatever answers.

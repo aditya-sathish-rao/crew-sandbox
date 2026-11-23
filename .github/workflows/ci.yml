@@ -1,0 +1,40 @@
+name: ci
+
+# Only what a build can prove with no VM and no network: unit tests (including
+# `node --check` and `bash -n` on every embedded script), both `--selftest` runs,
+# prettier, the guest-configuration evaluation, and the operator binary itself.
+#
+# The phase gates are deliberately not here. They assert on this operator's guest,
+# with this operator's secrets, and `vmType: vz` cannot nest inside a hosted macOS
+# runner — see "Where the gates run" in the README.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flake:
+    name: flake checks (aarch64-darwin)
+    # macos-15 is an arm64 runner, so the package is built for the platform it
+    # ships on rather than cross-compiled. Pinned by digest, not by tag.
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: build the operator binary
+        run: nix build .#crew-sandbox --no-link -L
+      - name: run the flake checks
+        run: nix flake check -L

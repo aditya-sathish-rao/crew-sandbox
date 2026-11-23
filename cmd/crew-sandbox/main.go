@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/aditya-sathish-rao/crew-sandbox/internal/broker"
 	"github.com/aditya-sathish-rao/crew-sandbox/internal/lima"
@@ -32,7 +33,7 @@ const usage = `usage: crew-sandbox <command> [flags] [-- args]
 
   run      start the guest if needed and run a command inside it
   up       create the guest if missing and start it
-  down     stop the guest
+  down     stop the guest and revoke the broker's tokens
   destroy  delete the guest and its disk
   status   show Lima's view of the guest
   broker   run the token broker in the foreground
@@ -49,6 +50,7 @@ proxy flags:
   --model-provider NAME  provider label used in logs (default: model)
   --model-upstream URL   model provider base URL; empty disables the gateway
   --model-key-env NAME   vault secret holding the model key (default: CREW_MODEL_KEY)
+  --model-port PORT      model gateway listen port (default: 3130)
   --egress-allow FILE    hostname allowlist; empty uses the embedded example
 
 broker flags:
@@ -64,7 +66,7 @@ check flags:
   --model-upstream URL   model provider base URL the gateway forwards to
   --model-key-env NAME   vault secret holding the model key (default: CREW_MODEL_KEY)
   --app-id ID            GitHub App ID for the broker gate (public config)
-  --other-repo OWNER/NAME  repository the App is not installed on, to refuse a token
+  --other-repo OWNER/NAME  another repository the App is installed on, to prove scoping
   --broker-port PORT     port the broker gate starts (default: 3139)
   --redteam-log FILE     keep the adversarial transcript in this file
   --redteam-repos LIST   owner/name repositories the red team tries to push to
@@ -223,6 +225,7 @@ func cmdDown(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("down", flag.ContinueOnError)
 	var f guestFlags
 	f.bind(fs)
+	brokerPort := fs.Int("broker-port", 3129, "port of the running token broker")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -230,11 +233,32 @@ func cmdDown(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := g.Stop(); err != nil {
-		return err
+
+	// Stop before revoking: a token minted while the guest is still up would
+	// otherwise survive the sweep. Revoke even if the stop fails, because a
+	// credential that outlives the VM is worse than a VM that did not stop.
+	// Each half decides the exit status; neither can skip the other.
+	stopErr := g.Stop()
+	if stopErr != nil {
+		fmt.Fprintf(os.Stderr, "crew-sandbox: the guest did not stop; revoking anyway: %v\n", stopErr)
+	} else {
+		fmt.Printf("crew-sandbox: %s is stopped\n", g.Name)
 	}
-	fmt.Printf("crew-sandbox: %s is stopped\n", g.Name)
-	return nil
+
+	// The revoke must not be cancelled by a Ctrl-C that interrupted the stop.
+	revokeCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	revoked, revokeErr := broker.RevokeAll(revokeCtx, fmt.Sprintf("http://127.0.0.1:%d", *brokerPort))
+	switch {
+	case errors.Is(revokeErr, syscall.ECONNREFUSED):
+		fmt.Fprintln(os.Stderr, "crew-sandbox: no token broker is running; no tokens to revoke")
+		revokeErr = nil
+	case revokeErr != nil:
+		fmt.Fprintf(os.Stderr, "crew-sandbox: the broker did not revoke its tokens: %v\n", revokeErr)
+	default:
+		fmt.Printf("crew-sandbox: revoked %d of %d broker tokens\n", revoked.Revoked, revoked.Tasks)
+	}
+	return errors.Join(stopErr, revokeErr)
 }
 
 func cmdDestroy(ctx context.Context, args []string) error {
@@ -334,6 +358,7 @@ func cmdProxy(ctx context.Context, args []string) error {
 	upstream := fs.String("model-upstream", "", "model provider base URL; empty disables the gateway")
 	keyEnv := fs.String("model-key-env", "CREW_MODEL_KEY", "vault secret name holding the model key")
 	keyHashOut := fs.String("key-hash-out", "", "write the model key's SHA-256 to this file, for the model gate")
+	modelPort := fs.Int("model-port", 0, "model gateway listen port (default 3130)")
 	egressAllow := fs.String("egress-allow", "", "hostname allowlist file; empty uses the embedded example")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -352,6 +377,7 @@ func cmdProxy(ctx context.Context, args []string) error {
 			Upstream: *upstream,
 		},
 		Port:        *port,
+		ModelPort:   *modelPort,
 		KeyHashPath: *keyHashOut,
 	}
 	if *egressAllow != "" {
@@ -412,7 +438,7 @@ func cmdCheck(ctx context.Context, args []string) error {
 	modelUpstream := fs.String("model-upstream", envOr("CREW_MODEL_UPSTREAM", ""), "model provider base URL the gateway forwards to")
 	modelKeyEnv := fs.String("model-key-env", envOr("CREW_MODEL_KEY_ENV", "CREW_MODEL_KEY"), "vault secret holding the model key")
 	appID := fs.String("app-id", envOr("CREW_APP_ID", ""), "GitHub App ID for the broker gate")
-	otherRepo := fs.String("other-repo", envOr("CREW_BROKER_OTHER_REPO", ""), "repository the App is not installed on")
+	otherRepo := fs.String("other-repo", envOr("CREW_BROKER_OTHER_REPO", ""), "another repository the App is installed on but the token is not scoped to")
 	brokerPortDefault, _ := strconv.Atoi(os.Getenv("CREW_BROKER_PORT"))
 	if brokerPortDefault == 0 {
 		brokerPortDefault = 3139
