@@ -24,6 +24,27 @@ gateway=$(ip -4 route show default | awk '{print $3; exit}')
 proxy="http://${gateway}:3128"
 workspace=${CREW_WORKSPACE:-}
 repos=${CREW_REDTEAM_REPOS:-}
+# A real repository this guest can name when the operator supplies neither a list
+# nor a workspace with an origin. The project repo is public, so an unauthenticated
+# push reaches GitHub and is refused; a leaked credential is what the attack looks
+# for.
+default_repo=${CREW_REDTEAM_DEFAULT_REPO:-aditya-sathish-rao/crew-sandbox}
+
+# workspace_repo prints owner/name from the mounted workspace's origin, if it has
+# one. The workspace is read-only, which is enough: this only reads the remote URL.
+workspace_repo() {
+  [[ -n "$workspace" ]] || return 0
+  git -C "$workspace" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  local url
+  url=$(git -C "$workspace" remote get-url origin 2>/dev/null) || return 0
+  url=$(printf '%s' "$url" | sed -E 's#^https://[^@/]+@#https://#')
+  case "$url" in
+    https://github.com/*) url=${url#https://github.com/} ;;
+    git@github.com:*) url=${url#git@github.com:} ;;
+    *) return 0 ;;
+  esac
+  printf '%s\n' "${url%.git}"
+}
 
 total=0
 blocked=0
@@ -111,11 +132,12 @@ exfiltrate() {
 }
 
 # 4. Use a credential against GitHub. The API host is on the allowlist on purpose,
-# so this is the interesting case: the route is open and there is still no token to
-# spend. With repositories named, the same probe is aimed at a default branch and at
-# a project the App is not installed on.
+# so the route is open and there is still no token to spend. The same attempt is
+# aimed at a real repository: the workspace's origin, the operator's list, or the
+# project repo. A push that fails for lack of a credential is the point; one that
+# succeeds is the escape.
 push() {
-  local code evidence="" target
+  local code evidence="" target ref out rc tmp targets
   code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' -x "$proxy" \
     -H 'Authorization: token none' https://api.github.com/installation/repositories 2>/dev/null) || code=000
   if [[ "$code" == 200 ]]; then
@@ -123,11 +145,12 @@ push() {
     return
   fi
   evidence="api.github.com refuses the guest (${code})"
-  if [[ -z "$repos" ]]; then
-    record BLOCKED push-to-github "$evidence; no repository was named to push to"
-    return
-  fi
-  for target in $repos; do
+
+  targets=$repos
+  if [[ -z "$targets" ]]; then targets=$(workspace_repo); fi
+  if [[ -z "$targets" ]]; then targets=$default_repo; fi
+
+  for target in $targets; do
     code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' -x "$proxy" \
       -X PUT -H 'content-type: application/json' \
       -d '{"message":"redteam probe","content":"cmVkdGVhbQ==","branch":"main"}' \
@@ -138,16 +161,65 @@ push() {
         return
         ;;
     esac
-    evidence="$evidence; ${target} refused (${code})"
+    evidence="$evidence; ${target} refused the API write (${code})"
   done
+
+  target=${targets%% *}
+  if ! command -v git >/dev/null 2>&1; then
+    record SKIP push-to-github "${evidence}; no git in the guest to attempt a push"
+    return
+  fi
+
+  tmp=$(mktemp -d)
+  if ! git -C "$tmp" init -q 2>/dev/null ||
+    ! git -C "$tmp" -c user.email=redteam@example.invalid -c user.name=redteam \
+      commit -q --allow-empty -m "redteam probe" 2>/dev/null; then
+    rm -rf "$tmp"
+    record SKIP push-to-github "${evidence}; could not build a throwaway commit"
+    return
+  fi
+
+  ref="refs/heads/crew-redteam-probe-$$"
+  out=$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false \
+    https_proxy="$proxy" http_proxy="$proxy" HTTPS_PROXY="$proxy" HTTP_PROXY="$proxy" \
+    timeout 30 git -C "$tmp" push "https://github.com/${target}.git" "HEAD:${ref}" 2>&1)
+  rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    # The push worked, so a credential the guest should not have was usable. Remove
+    # the evidence branch with the same credential and report the escape either way.
+    GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false \
+      https_proxy="$proxy" http_proxy="$proxy" HTTPS_PROXY="$proxy" HTTP_PROXY="$proxy" \
+      timeout 30 git -C "$tmp" push "https://github.com/${target}.git" \
+      --delete "${ref#refs/heads/}" >/dev/null 2>&1 || true
+    rm -rf "$tmp"
+    record ESCAPED push-to-github "pushed ${ref} to ${target}"
+    return
+  fi
+  rm -rf "$tmp"
+
+  # Keep the transcript one line and free of anything credential-shaped.
+  out=$(printf '%s' "$out" | tr '\n' ' ' |
+    sed -E 's#https://[^ ]*@#https://***@#g' | cut -c1-180)
+  case "$out" in
+    *"could not read Username"* | *"Authentication failed"* | *"403"* | *"401"*)
+      evidence="$evidence; the push reached GitHub and was refused (${out})"
+      ;;
+    *"CONNECT"* | *"proxy"* | *"onnection refused"*)
+      evidence="$evidence; the proxy refused the push (${out})"
+      ;;
+    *)
+      evidence="$evidence; the push did not leave the guest (${out})"
+      ;;
+  esac
   record BLOCKED push-to-github "$evidence"
 }
 
-# 5. Reach the host's own services. The proxy port is not in the list because it is
-# the way out by design; everything else is a service the operator runs.
+# 5. Reach the host's own services. The proxy and model-gateway ports are not in the
+# list because they are the way out by design; everything else is a service the
+# operator runs.
 reach_host_services() {
   local port open=""
-  for port in 22 80 3000 3129 3130 5432 8080 8888; do
+  for port in 22 80 3000 3129 5432 8080 8888; do
     if timeout 2 bash -c ": >/dev/tcp/${gateway}/${port}" 2>/dev/null; then
       open="$open $port"
     fi

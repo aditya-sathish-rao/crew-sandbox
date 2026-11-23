@@ -1,6 +1,8 @@
 # Sandbox the crew: a Linux VM for computation, the Mac for authority
 
-**Status:** plan, not implemented
+**Status:** plan, kept for history. The sandbox is implemented in this repository; see
+[../README.md](../README.md) and [../SECURITY.md](../SECURITY.md) for the current state.
+Phase 0 and the consumer-supplied Phase 4 fleet remain open.
 **Date:** 2026-11-20
 **Subject:** `agentic-dev-env` @ `5d2be4a` + working tree
 

@@ -9,14 +9,21 @@
 package vault
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
+
+// A secret name becomes part of a shell command below, so it is constrained to
+// what an environment variable may be called.
+var secretName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Provider resolves a secret by name. Implementations must not log the value.
 type Provider interface {
@@ -55,42 +62,53 @@ func (a AtomicVault) timeout() time.Duration {
 	return 10 * time.Second
 }
 
-// Get runs `av inject +NAME -- env` and parses the value out of the environment
-// dump. av is the only supported way to read a secret without the operator
-// pasting it, and it is what the original crew-sandbox.sh used.
+// Get runs `av inject +NAME -- sh -c 'printf %s "$NAME"'` and returns what that
+// command writes. av is the only supported way to read a secret without the
+// operator pasting it, and it is what the original crew-sandbox.sh used.
+//
+// Reading the command's stdout avoids parsing an `env` dump, which is ambiguous
+// for a multi-line value: a GitHub App private key spans many lines, and a
+// line-oriented parser keeps only the first one.
 //
 // A refusal that means "this secret is not available here" — approval required in
 // a non-interactive run, or no such secret — is reported as ErrNotFound so a chain
 // can fall through to the next provider. A genuine failure (av missing, a crash)
 // is reported as itself and stops the chain.
 func (a AtomicVault) Get(ctx context.Context, name string) (string, error) {
+	if !secretName.MatchString(name) {
+		return "", fmt.Errorf("vault: invalid secret name %q", name)
+	}
+
 	// av can block on an interactive approval prompt. A bounded timeout keeps a
 	// non-interactive run from hanging forever; the timeout is reported as
 	// unavailable so a chain can fall through instead of failing hard.
 	ctx, cancel := context.WithTimeout(ctx, a.timeout())
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, a.binary(), "inject", "+"+name, "--", "env")
+	cmd := exec.CommandContext(ctx, a.binary(), "inject", "+"+name, "--",
+		"sh", "-c", `printf '%s' "$`+name+`"`)
+	// Show av's own prompt on stderr while keeping it for the error message.
+	var stderr bytes.Buffer
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
 	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("%w: %s (av timed out)", ErrNotFound, name)
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			msg := strings.TrimSpace(string(exitErr.Stderr))
+			msg := strings.TrimSpace(stderr.String())
 			if unavailable(msg) {
 				return "", fmt.Errorf("%w: %s (%s)", ErrNotFound, name, msg)
 			}
+			if msg == "" {
+				msg = fmt.Sprintf("exit %d", exitErr.ExitCode())
+			}
 			return "", fmt.Errorf("av inject %s: %s", name, msg)
-		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			return "", fmt.Errorf("%w: %s (av timed out)", ErrNotFound, name)
 		}
 		return "", fmt.Errorf("av inject %s: %w", name, err)
 	}
-	value, ok := lookupEnv(string(out), name)
-	if !ok {
-		return "", fmt.Errorf("%w: %s", ErrNotFound, name)
-	}
-	return value, nil
+	return string(out), nil
 }
 
 // unavailable reports whether av's message means "not available in this context"
@@ -109,21 +127,6 @@ func unavailable(msg string) bool {
 		}
 	}
 	return false
-}
-
-// lookupEnv finds NAME=value in an env dump. The last occurrence wins, matching
-// how a shell would resolve a duplicate assignment.
-func lookupEnv(dump, name string) (string, bool) {
-	prefix := name + "="
-	var value string
-	var found bool
-	for _, line := range strings.Split(dump, "\n") {
-		if strings.HasPrefix(line, prefix) {
-			value = strings.TrimPrefix(line, prefix)
-			found = true
-		}
-	}
-	return value, found
 }
 
 // Static is a provider backed by a map. It exists for tests and for operators who

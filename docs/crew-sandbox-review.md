@@ -1,7 +1,13 @@
 # Crew sandbox: plan vs. code review
 
-Reviewed 21 November 2026. Plan: [`crew-sandbox-plan-revised.md`](.lavish/crew-sandbox-plan-revised.md).
+Reviewed 21 November 2026. Plan: [`crew-sandbox-plan.md`](crew-sandbox-plan.md).
 Code: [`nix/crew-sandbox/`](nix/crew-sandbox) at `324c119`, plus the uncommitted `GLOSSARY.md` edit.
+
+> **Status (2026-11-23).** This review was written against the original tree at
+> `324c119`. In the current repository the high and medium findings are closed or
+> listed under Known limitations in [../SECURITY.md](../SECURITY.md); the paths and
+> some table rows below are historical. The recorded gate runs are in
+> [../README.md](../README.md).
 
 This is a review, not a rewrite. Every finding below was reproduced against the running
 `crew` VM or read out of the source; nothing here is inferred from the plan alone.
@@ -379,7 +385,7 @@ The guarantee is now "only allowlisted hostnames", not "only their ordinary traf
 that skips certificate validation can present an allowed SNI and a different `Host` inside
 the tunnel. Closing that needs TLS termination in the proxy — the CA the plan originally
 proposed and the code deliberately dropped. It is written down in
-[docs/README.md](docs/README.md) next to the egress guarantees.
+[SECURITY.md](../SECURITY.md) next to the egress guarantees.
 
 A note on method: this was verified against a locally started `proxy.mjs` and the real CDN
 addresses the attack used, not against the VM (`limactl` is not on this host), so the
@@ -592,17 +598,17 @@ including a check that `herdr` runs.
 
 | Plan item                                                      | State                                                                                 |
 | -------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| Phase 0: headless host, power-cut gate                         | nothing                                                                               |
-| Phase 4: herdr, firstmate fork+pin, worktree pool in the guest | nothing; `herdr` not installed                                                        |
-| Phase 5: red-team script and recorded evidence                 | nothing                                                                               |
-| Token bound to the task that asked                             | not implemented (C1)                                                                  |
+| Phase 0: headless host, power-cut gate                         | nothing; listed under Known limitations in `SECURITY.md`                               |
+| Phase 4: herdr, firstmate fork+pin, worktree pool in the guest | not in this repo: the fleet is consumer-supplied via `extraPackages`; `herdr` not installed |
+| Phase 5: red-team script and recorded evidence                 | **done**: `verify/redteam/redteam.sh`; transcript in the README                       |
+| Token bound to the task that asked                             | not implemented (C1); the broker port is closed to the guest                          |
 | Per-task caps: tokens, iterations, wall-clock                  | nothing                                                                               |
 | Daily budget at the proxy; provider spend cap                  | nothing                                                                               |
-| Remote kill that revokes and stops                             | `kill` exists; the revoke half cannot reach a gate-issued token (M4)                  |
+| Remote kill that revokes and stops                             | **done**: `down` stops, then revokes; `/revoke-all` settles in parallel (C3, M9)      |
 | Health command naming VM / proxy / herdr                       | nothing                                                                               |
 | Recovery order after a power loss                              | nothing                                                                               |
-| Branch protection and required CI on a throwaway repo          | **done**: `checks/broker-ruleset.json` + `crew-sandbox ruleset`, enforced by the gate |
-| `api.github.com` reachable for the crew's tools                | missing (C2)                                                                          |
+| Branch protection and required CI on a throwaway repo          | **done**: `verify/gates/broker-ruleset.json`, enforced by the gate; applied out of band |
+| `api.github.com` reachable for the crew's tools                | **done** (C2); asserted by the proxy gate                                             |
 
 ### In the code, beyond the plan
 

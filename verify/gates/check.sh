@@ -305,7 +305,9 @@ probe_no_forward() {
 # operator configured; with none, the proxy falls back to the embedded example.
 proxy_args=()
 build_proxy_args() {
-  proxy_args=(proxy)
+  # The proxy reads the guest's model token, so it has to be pointed at the guest
+  # under test rather than the default name.
+  proxy_args=(proxy --name "$name")
   if [[ -n "$egress_allow" ]]; then proxy_args+=(--egress-allow "$egress_allow"); fi
 }
 

@@ -184,8 +184,11 @@ total is theirs.
 
 ### A recorded run
 
-Against this repository's guest on 2026-11-23 (aarch64), with `/tmp/test-repo` mounted
-read-only. These two phases need nothing from the vault.
+Against this repository's guests on 2026-11-23 (aarch64), with `/tmp/test-repo` mounted
+read-only. `guest` and `redteam` ran on the `crew-sandbox` guest; `model` ran on the older
+`crew` guest, whose existing home-manager generation already carried `pi` (its
+`models.json` was pointed at the new 3130 gateway port and the 3130 firewall rule was
+added to match the current `lima.yaml`). `broker` is a host-only phase.
 
 ```console
 $ crew-sandbox check guest --workspace /tmp/test-repo
@@ -207,16 +210,73 @@ PASS  a guest listener on loopback stays off the host
 
 guest: pass
 
+$ crew-sandbox check model --name crew --model-upstream https://api.deepseek.com --model-key-env DEEPSEEK_API_KEY
+
+model: starting the proxy with the vault key for the duration of this gate
+model: approve the vault prompt if one appears
+
+phase 5: the model key
+PASS  the guest holds a model gateway token
+PASS  the gateway token is not a model key
+PASS  no environment value is the model key
+PASS  the model client's provider points at the gateway
+PASS  the model client reads its gateway token from the guest file
+PASS  the model client defaults to a provider through the gateway (deepseek/deepseek-flash)
+PASS  the gateway refuses a request without a token
+PASS  the gateway refuses a request with the wrong token
+PASS  the gateway reaches the model API with the host's key
+PASS  the gateway refuses paths outside the model API
+PASS  the model API is unreachable without the gateway
+PASS  the harness lists the proxied model (deepseek-flash)
+PASS  the ClientHello parser reads the name a tunnel asks for
+
+phase 4: the egress proxy (through the keyed proxy)
+PASS  an allowlisted host answers through the proxy
+PASS  the GitHub API answers through the proxy (200)
+PASS  a host off the allowlist is refused over https
+PASS  a host off the allowlist is refused over http
+PASS  a non-web port is refused even on an allowlisted host
+PASS  a spoofed Host header cannot retarget a plain-HTTP request
+PASS  a tunnel whose SNI names another host is refused
+PASS  CONNECT is refused on port 80
+PASS  the guest still cannot reach the internet without the proxy
+
+model: pass
+
+$ crew-sandbox check broker --app-id 5853565 --other-repo aditya-sathish-rao/agentic-dev-env
+
+broker: starting the broker with the vault key for the duration of this gate
+broker: approve the vault prompt if one appears
+
+phase 6: the token broker
+PASS  the broker answers on its health route
+PASS  the broker names an allowlisted repository (crew-broker)
+PASS  a repository outside the allowlist is refused before minting
+PASS  the broker mints a token for crew-broker
+PASS  the token sees its own repository (aditya-sathish-rao/crew-broker)
+PASS  the token reads its own repository
+PASS  the gate knows the default branch (main)
+PASS  the default branch requires a pull request (pull_request,non_fast_forward,deletion)
+PASS  the token creates an agent branch (agent/gate-gate-49064)
+PASS  the token may write an agent branch
+PASS  the default branch refuses the token (409)
+PASS  GitHub refuses the token a write on another repository (403)
+PASS  the gate deletes its agent branch
+PASS  the broker revokes the token
+PASS  GitHub refuses the revoked token
+
+broker: pass
+
 $ crew-sandbox check redteam --workspace /tmp/test-repo
 proxy: starting one for the duration of this phase
 
 phase 7: the adversary
-redteam 2026-11-23T12:47:00+05:30 on lima-crew-sandbox as agent
+redteam 2026-11-23T16:01:48+05:30 on lima-crew-sandbox as agent
 BLOCKED  read-host-home        no host home in the guest; unreadable: /home/crew /root
 BLOCKED  find-a-key            no key-shaped value in the environment, no key store in $HOME, and the guest token is not a key
 BLOCKED  exfiltrate            direct POST refused; the proxy refused example.com; no resolver answers
-BLOCKED  push-to-github        api.github.com refuses the guest (401); no repository was named to push to
-BLOCKED  reach-host-services   nothing on 192.168.5.2 accepts a connection except the proxy port
+BLOCKED  push-to-github        api.github.com refuses the guest (401); aditya-sathish-rao/crew-sandbox refused the API write (401); the push reached GitHub and was refused (error: unable to read askpass response from '/bin/false' fatal: could not read Username for 'https://github.com': terminal prompts disabled)
+BLOCKED  reach-host-services   nothing on 192.168.5.2 accepts a connection except the proxy and model-gateway ports
 BLOCKED  escalate              sudo refused; the ruleset cannot be flushed; the ruleset file is not writable
 BLOCKED  plant-in-workspace    the workspace is read-only, so no file and no symlink could be planted
 
@@ -225,9 +285,9 @@ redteam: 7/7 blocked
 redteam: pass
 ```
 
-`model` and `broker` are not in that transcript: both need the vault, and `model` also
-needs a guest with the home-manager configuration applied. A phase whose input is missing
-says which flag it wanted and fails — it does not pass over an assertion it could not make.
+`root` and `toolchain` are not in this transcript; their assertion counts are in the table
+above. A phase whose input is missing says which flag it wanted and fails — it does not
+pass over an assertion it could not make.
 
 Nothing above is part of `nix flake check`. A Nix build has no VM and no network, so the
 gates only run from `crew-sandbox check`. What `nix flake check` covers is what a build

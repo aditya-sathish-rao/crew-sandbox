@@ -69,7 +69,7 @@ check flags:
   --other-repo OWNER/NAME  another repository the App is installed on, to prove scoping
   --broker-port PORT     port the broker gate starts (default: 3139)
   --redteam-log FILE     keep the adversarial transcript in this file
-  --redteam-repos LIST   owner/name repositories the red team tries to push to
+  --redteam-repos LIST   owner/name repositories the red team tries to push to (default: workspace origin or the project repo)
 
 check phases:
   guest, root, toolchain, proxy, model, broker, redteam, all (default: guest)
@@ -445,7 +445,7 @@ func cmdCheck(ctx context.Context, args []string) error {
 	}
 	brokerPort := fs.Int("broker-port", brokerPortDefault, "port the broker gate starts")
 	redteamLog := fs.String("redteam-log", envOr("CREW_REDTEAM_LOG", ""), "keep the adversarial transcript in this file")
-	redteamRepos := fs.String("redteam-repos", envOr("CREW_REDTEAM_REPOS", ""), "space-separated owner/name repositories the red team tries to push to")
+	redteamRepos := fs.String("redteam-repos", envOr("CREW_REDTEAM_REPOS", ""), "space-separated owner/name repositories the red team tries to push to; empty uses the workspace origin or the project repo")
 	// The phase list is the top-level usage, so -h shows that rather than flag's
 	// own dump of the flags.
 	fs.Usage = func() {}
@@ -522,7 +522,10 @@ func envOr(name, fallback string) string {
 // asking the vault would block on an approval prompt for a value we already have.
 // Atomic Vault is the fallback and the default for anyone who has not exported it.
 func secret(ctx context.Context, name string) (string, error) {
-	provider := vault.Chain(vault.FromEnv{}, vault.AtomicVault{})
+	// The operator approves a vault prompt by hand, which can take longer than the
+	// provider's non-interactive default. The chain still falls through on
+	// "not available", so a missing secret fails loudly rather than hanging.
+	provider := vault.Chain(vault.FromEnv{}, vault.AtomicVault{Timeout: 60 * time.Second})
 	value, err := provider.Get(ctx, name)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w (export it or set it in Atomic Vault)", name, err)

@@ -53,15 +53,36 @@ if (repos.length === 0) {
 // The fingerprint GitHub shows beside a generated key, computed from the public
 // half. Printing it lets an operator confirm the vault holds the key they think it
 // does without the key itself ever reaching a terminal.
-const keyFingerprint = () =>
-  `SHA256:${crypto
-    .createHash("sha256")
-    .update(
-      crypto
-        .createPublicKey(privateKey)
-        .export({ type: "spki", format: "der" }),
-    )
-    .digest("base64")}`;
+//
+// The vault key may be PKCS#1 ("BEGIN RSA PRIVATE KEY") or PKCS#8 ("BEGIN PRIVATE
+// KEY"). Creating the key object once accepts both and validates the key before the
+// listener starts. The fingerprint is only a log line, so a format Node cannot
+// export must not take the broker down.
+const privateKeyObject = (() => {
+  try {
+    return crypto.createPrivateKey(privateKey);
+  } catch (error) {
+    console.error(
+      `crew-broker: cannot parse GITHUB_APP_PRIVATE_KEY: ${error.message}`,
+    );
+    process.exit(2);
+  }
+})();
+
+const keyFingerprint = () => {
+  try {
+    return `SHA256:${crypto
+      .createHash("sha256")
+      .update(
+        crypto
+          .createPublicKey(privateKeyObject)
+          .export({ type: "spki", format: "der" }),
+      )
+      .digest("base64")}`;
+  } catch {
+    return "unavailable";
+  }
+};
 
 const base64url = (input) =>
   Buffer.from(input)
@@ -81,7 +102,7 @@ const appJwt = () => {
   const signature = crypto
     .createSign("RSA-SHA256")
     .update(`${header}.${payload}`)
-    .sign(privateKey);
+    .sign(privateKeyObject);
   return `${header}.${payload}.${base64url(signature)}`;
 };
 
@@ -285,7 +306,7 @@ if (process.argv.includes("--selftest")) {
   // Prove the signing path without the network: sign, then verify with the public
   // half of the same key. A wrong key or a mangled base64url fails here.
   const [header, payload, signature] = appJwt().split(".");
-  const publicKey = crypto.createPublicKey(privateKey);
+  const publicKey = crypto.createPublicKey(privateKeyObject);
   const verified = crypto
     .createVerify("RSA-SHA256")
     .update(`${header}.${payload}`)

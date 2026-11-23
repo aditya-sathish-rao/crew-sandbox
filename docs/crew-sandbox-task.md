@@ -1,10 +1,15 @@
 # How the crew sandbox works, and why each piece is there
 
+> **Status (2026-11-23).** This walkthrough was written against the original
+> `agentic-dev-env/nix/crew-sandbox/` tree at `324c119`. The implementation now lives
+> in this repository as the Go CLI (`cmd/`, `internal/`), the guest module
+> (`nix/guest/`) and the embedded gates (`verify/`); the paths below are historical.
+> [../README.md](../README.md) and [../SECURITY.md](../SECURITY.md) describe the
+> current state.
+
 A walkthrough of the code in [`nix/crew-sandbox/`](nix/crew-sandbox), written to be read
 before the next phase. The review of what is missing is in
 [crew-sandbox-review.md](crew-sandbox-review.md); this file explains what exists.
-
-Terms are defined in [GLOSSARY.md](GLOSSARY.md).
 
 ---
 
@@ -582,17 +587,30 @@ ls /Users                                                  # fails: no host file
 
 ## What is not there yet
 
-Stated plainly, because the gates currently pass while these are true:
+Stated plainly, because a passing gate does not mean the phase exists:
 
 - **The Mac is not ready to be headless.** Nothing sets never-sleep or restart-after-power-
   failure, so Phase 0's own test — pull the power, come back, reach it — has never been run.
-- **The fleet is not in the guest.** `herdr` is not installed, there is no git identity, and
-  `~/agentic-dev-env` in the guest is not a git repository. Phase 4 has not started.
-- **The GitHub API is not reachable.** `api.github.com` is missing from `egress-allow`, so
-  `gh-axi` and `no-mistakes` cannot work in the guest even though `git clone` does.
-- **The broker is open.** Any crewmate can ask it for a token, because it checks no
-  credential. The port is even opened in the firewall on purpose.
-- **No red-team run exists.** Phase 5 is a plan, not a script.
+  This is host configuration the sandbox repository does not write.
+- **The fleet is not in the guest.** `herdr` is not installed and there is no git identity.
+  This repository treats the fleet as consumer-supplied: the guest module installs no tools,
+  and a consumer passes them as `extraPackages`. Phase 4 has not started.
+- **The Nix store is agent-owned.** Single-user Nix means a crewmate can replace the tools it
+  runs. The pins stop drift, not tampering, and `nix-store --verify` checks registration
+  rather than contents. See [../SECURITY.md](../SECURITY.md) §6.
+- **The broker authenticates no caller.** The port is closed to the guest, so the minting
+  path is unreachable, but per-task authentication is Phase 4 work. See
+  [../SECURITY.md](../SECURITY.md) §6.
 
-The review in [crew-sandbox-review.md](crew-sandbox-review.md) lists each of these
-with the evidence and the fix, ordered by effect per unit of work.
+Fixed since the review, and asserted by a gate or recorded in the README:
+
+- `api.github.com` is in the egress allowlist, and the proxy gate fails if it stops
+  answering (C2).
+- The broker port is closed to the guest, and the root gate asserts it (C1).
+- The red-team script exists and runs; `push-to-github` now attempts a real `git push`,
+  not just an API call (Phase 5).
+- The model gateway has its own listener (3130), and the README records `model` and
+  `broker` passing end to end.
+
+The review in [crew-sandbox-review.md](crew-sandbox-review.md) is the historical evidence,
+ordered by effect per unit of work.
