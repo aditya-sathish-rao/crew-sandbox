@@ -149,6 +149,9 @@ The CLI needs `limactl` and `node`, and the gates need `curl`, `jq` and coreutil
 packaged binary wraps all of them. Running it from `nix develop` gives you the same tools
 without the wrapper.
 
+`graphify-out/graph.json` is a committed symbol graph of this code. See
+[`docs/code-graph.md`](docs/code-graph.md) for the lookups it answers and how to refresh it.
+
 ## Verification
 
 `verify/` holds the gates. Each is a script that runs named assertions, one line per
