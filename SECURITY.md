@@ -205,11 +205,18 @@ on tmpfs and treating a failed copy as a named tampering failure.
   inside the boundary. The blast radius is the guest, which is already the untrusted
   side; a root-owned store with a daemon would be needed to make this an integrity
   boundary, and that contradicts the "no root afterwards" design.
+- **The host services stop at logout.** `darwinModules.default` runs the egress proxy
+  and the token broker as launchd *user agents*, because the vault will not hand a
+  daemon a key without a human: every unattended `av inject` read was recorded as
+  `Manual`, while only a tool-specific Authorization Gate answered `Auto`. So the
+  services start at login and stop when the last user logs out, and a Mac that reboots
+  unattended has no egress proxy until someone logs in. Running them as root daemons
+  would need a vault policy that approves an exact signed executable without a human —
+  a decision this repository does not make for the operator.
 - **Phase 0 is not implemented here.** The plan's headless-host phase — never sleep,
   restart after a power cut, autologin — is host configuration this repository does
-  not write; the `darwinModules.default` host module described in `nix/modules/` is
-  not built yet. Until the operator's host configuration sets those, Phase 0's own
-  gate (cut the power, come back) cannot be attempted.
+  not write. Until the operator's host configuration sets those, Phase 0's own gate
+  (cut the power, come back) cannot be attempted.
 - **Phase 4's fleet is the consumer's.** The guest module installs no tools and sets
   no git identity. A consumer supplies herdr, firstmate and the rest through
   `extraPackages`, and `crew-sandbox check toolchain --expected-tools …` asserts only

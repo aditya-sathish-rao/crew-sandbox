@@ -10,6 +10,14 @@
       url = "github:nix-community/home-manager/release-26.05";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    # Only for evaluating the exported darwin module in `checks`. A consumer
+    # already running nix-darwin should make it follow its own input rather than
+    # take this one, so a second copy of nixpkgs is never evaluated.
+    nix-darwin = {
+      url = "github:nix-darwin/nix-darwin/nix-darwin-26.05";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -17,6 +25,7 @@
       self,
       nixpkgs,
       home-manager,
+      nix-darwin,
     }:
     let
       # Darwin is where the operator and the host-side authority live; Linux is
@@ -50,6 +59,17 @@
         # A syntax error in a .mjs costs a live proxy, and an unformatted one is a
         # review blind spot. The unit tests run `node --check`; this enforces the
         # style without needing a network or a VM.
+        # The darwin module is only a configuration once nix-darwin has evaluated
+        # it against a real host: a misspelled option or a bad `ProgramArguments`
+        # type stays invisible until someone rebuilds. This evaluates a
+        # configuration with the services enabled and asserts what launchd would
+        # actually be given.
+        darwin = import ./nix/checks/darwin.nix {
+          inherit pkgs nixpkgs nix-darwin;
+          lib = pkgs.lib;
+          crew-sandbox = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+        };
+
         formatting = pkgs.runCommand "crew-sandbox-formatting" { nativeBuildInputs = [ pkgs.prettier ]; } ''
           export HOME=$TMPDIR
           prettier --check --no-cache \
@@ -79,5 +99,10 @@
       # The guest's own home-manager configuration. A consumer adds it to its
       # `homeConfigurations` and supplies the fleet's tools as `extraPackages`.
       homeManagerModules.default = ./nix/guest;
+
+      # The host's configuration: the egress proxy and the token broker as launchd
+      # user agents. A consumer with nix-darwin adds `services.crew-sandbox.enable`,
+      # its `package`, its `appID` and its vault enrollment.
+      darwinModules.default = ./nix/modules/darwin.nix;
     };
 }

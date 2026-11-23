@@ -9,12 +9,12 @@ This repository is the tool extracted from
 `nix/crew-sandbox/`. It is meant to be consumed there as a Nix flake input, so the sandbox can
 be versioned, reviewed and tested on its own.
 
-**Status: core, guest config and gates ported.** The CLI, the VM definition, the token broker,
-the egress proxy, the guest's home-manager configuration and the phase gates are here. The
-gates need a running guest and the operator's secrets; a phase whose inputs are missing fails
-with the reason rather than reporting a pass. Phase 0's host settings and the fleet's tools
-are not: the guest module is deliberately empty, a consumer supplies the fleet, and the
-host-side `darwinModules.default` is still to be written.
+**Status: core, guest config, gates and host module ported.** The CLI, the VM definition,
+the token broker, the egress proxy, the guest's home-manager configuration, the phase gates
+and the nix-darwin host module are here. The gates need a running guest and the operator's
+secrets; a phase whose inputs are missing fails with the reason rather than reporting a
+pass. Phase 0's never-sleep and power settings and the fleet's tools are not: the guest
+module is deliberately empty and a consumer supplies the fleet.
 
 ## Why the boundary exists
 
@@ -47,7 +47,7 @@ Concretely, the boundary is four things:
 | ---------------- | ------------------------------------------------------------------------------- |
 | `cmd/`           | The operator CLI: `crew-sandbox run --workspace <path> -- <command>`.           |
 | `internal/`      | Implementation packages the CLI drives: VM lifecycle, proxy, broker.            |
-| `nix/modules/`   | Nix modules exported to consumers, including `darwinModules.default`.           |
+| `nix/modules/`   | The nix-darwin host module: the proxy and broker as launchd user agents.        |
 | `nix/packages/`  | The host package set the CLI and the darwin module depend on.                   |
 | `nix/guest/`     | The guest's home-manager configuration, exported as `homeManagerModules`.       |
 | `verify/gates/`  | One script per invariant in [SECURITY.md](SECURITY.md), run by `check`.         |
@@ -66,9 +66,9 @@ what must not.
 ```
 
 The flake exposes `packages.default` (the CLI), `checks.unit` (the Go unit tests),
-`checks.guest` (the guest configuration, evaluated), `homeManagerModules.default` (that
-configuration) and `devShells.default`/`formatter`. The `darwinModules.default` module is
-not written yet; it lands when the host-side options are settled.
+`checks.guest` (the guest configuration, evaluated), `checks.darwin` (the host module,
+evaluated), `homeManagerModules.default` (the guest configuration),
+`darwinModules.default` (the host configuration), and `devShells.default`/`formatter`.
 
 The guest configuration names no tools of its own. Pass the fleet as `extraPackages`, and
 the guest gets exactly those and a shell:
@@ -85,6 +85,32 @@ the guest gets exactly those and a shell:
 
 The username and home directory are not options: `nix/guest/` fixes them to the `agent`
 account `lima.yaml` creates, and activation fails anywhere else.
+
+### The host services
+
+`darwinModules.default` runs the egress proxy and the token broker as launchd **user
+agents**, which is the one shape the vault's policy allows:
+
+```nix
+{
+  imports = [ crew-sandbox.darwinModules.default ];
+
+  system.primaryUser = "you";   # nix-darwin requires it for user agents
+  services.crew-sandbox = {
+    enable = true;
+    package = crew-sandbox.packages.aarch64-darwin.default;
+    proxy.upstream = "https://api.deepseek.com";
+    proxy.keySecret = "CREW_MODEL_KEY";
+    broker.appID = "5853565";
+  };
+}
+```
+
+They run at login, as you, so the vault's approval prompt lands on a desktop where a
+human can answer it. A system daemon cannot do this: it starts before login, and the
+vault answers a keyless, unattended call with "human approval required". The trade is
+explicit — a Mac that reboots unattended has no egress proxy until someone logs in. See
+[`docs/darwin-module.md`](docs/darwin-module.md) for the measurement behind that choice.
 
 ### Applying it to the guest
 
