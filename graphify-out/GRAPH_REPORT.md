@@ -1,15 +1,17 @@
 # Graph Report - crew-sandbox  (2026-11-24)
 
 ## Corpus Check
-- cluster-only mode — file stats not available
+- 35 files · ~50,565 words
+- Verdict: corpus is large enough that graph structure adds value.
+- Unclassified: 14 file(s) not represented in the graph (top: .nix 8, (none) 3, .example 2)
 
 ## Summary
 - 338 nodes · 707 edges · 20 communities (19 shown, 1 thin omitted)
 - Extraction: 91% EXTRACTED · 9% INFERRED · 0% AMBIGUOUS · INFERRED: 65 edges (avg confidence: 0.83)
-- Token cost: 4,201 input · 6,948 output
+- Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `2ed2da91`
+- Built from commit: `d1b14f65`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -38,14 +40,14 @@
 ## God Nodes (most connected - your core abstractions)
 1. `Guest` - 13 edges
 2. `Command()` - 11 edges
-3. `cmdProxy()` - 10 edges
-4. `run()` - 10 edges
+3. `run()` - 10 edges
+4. `cmdProxy()` - 10 edges
 5. `check.sh script` - 9 edges
-6. `record()` - 8 edges
-7. `redteam.sh script` - 8 edges
-8. `phase_model()` - 8 edges
-9. `phase_proxy()` - 8 edges
-10. `require_host_tools()` - 8 edges
+6. `require_host_tools()` - 8 edges
+7. `stage()` - 8 edges
+8. `phase_proxy()` - 8 edges
+9. `phase_model()` - 8 edges
+10. `redteam.sh script` - 8 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `cmdDown()` --calls--> `RevokeAll()`  [EXTRACTED]
