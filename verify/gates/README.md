@@ -10,6 +10,7 @@ observe. The rest are the assertions.
 | Phase | Script | Runs as | Invariant |
 | --- | --- | --- | --- |
 | `guest` | `guest.sh` | `agent` in the guest | no host mount, default-deny egress, no sudo, no readable firewall |
+| `guest` | `check.sh` (host side) | the host | a guest listener never reaches the host's loopback; `crew-sandbox run` executes what it is given as `agent`, not as the Lima user |
 | `root` | `root.sh` | root in the guest | the ruleset, sudoers, the gate directory, the closed broker port |
 | `toolchain` | `toolchain.sh` | `agent`, login shell | the tools named by `--expected-tools` resolve under `/nix/store` (location only); the store has no registration errors |
 | `proxy` | `proxy.sh` | `agent` in the guest | the allowlist names hosts; SNI and `Host` cannot be retargeted |

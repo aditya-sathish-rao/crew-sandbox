@@ -16,8 +16,28 @@ import (
 	"time"
 )
 
+// addedEnv returns the environment entries Command appended to the child, i.e. the
+// ones this package chose. Only those are this package's business: the child also
+// inherits the operator's whole environment, which may legitimately name any
+// vendor, so scanning the joined environment for a vendor name fails for anyone
+// whose shell already mentions one - a DeepSeek API key or a model selector is
+// enough - regardless of what the code does.
+func addedEnv(cmd *exec.Cmd) []string {
+	inherited := make(map[string]bool, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		inherited[entry] = true
+	}
+	var added []string
+	for _, entry := range cmd.Env {
+		if !inherited[entry] {
+			added = append(added, entry)
+		}
+	}
+	return added
+}
+
 // The script must read the key from a provider-neutral variable. A vendor name in
-// the environment would make the gateway DeepSeek-specific again.
+// the environment this package sets would make the gateway DeepSeek-specific again.
 func TestCommandUsesProviderNeutralKeyVariable(t *testing.T) {
 	p, err := Command(context.Background(), Config{
 		Provider: Provider{Name: "acme", Upstream: "https://api.acme.test/v1"},
@@ -32,8 +52,10 @@ func TestCommandUsesProviderNeutralKeyVariable(t *testing.T) {
 	if !strings.Contains(env, "CREW_MODEL_KEY=sk-test") {
 		t.Errorf("key not passed as CREW_MODEL_KEY:\n%s", env)
 	}
-	if strings.Contains(strings.ToLower(env), "deepseek") {
-		t.Errorf("vendor name leaked into the child environment:\n%s", env)
+	// Assert on the variables this package sets, not on the inherited environment.
+	added := strings.Join(addedEnv(p.Cmd), "\n")
+	if strings.Contains(strings.ToLower(added), "deepseek") {
+		t.Errorf("vendor name leaked into the child environment this package sets:\n%s", added)
 	}
 }
 

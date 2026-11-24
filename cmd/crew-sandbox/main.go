@@ -42,7 +42,8 @@ const usage = `usage: crew-sandbox <command> [flags] [-- args]
 
 run flags:
   --workspace DIR   host directory to expose to the guest (default: none)
-  --writable        expose the workspace read-write (default: read-only)
+  --writable        expose the workspace read-write; a writable workspace is host code
+                    execution (see the note after this list)
   --name NAME       Lima instance name (default: crew-sandbox)
   --workdir DIR     directory inside the guest to run in
 
@@ -76,16 +77,44 @@ check phases:
 
 The guest sees nothing of the host unless --workspace is given. That is the
 boundary: a workspace mount is the one deliberate exception, and it is read-only
-unless --writable is passed.
+unless --writable is passed. Commands run as the unprivileged agent account, never
+as the Lima admin account.
 
-The model gateway is provider-agnostic. It forwards to whatever --model-upstream
-names and authenticates with the secret --model-key-env names, so no vendor is
-hardcoded. With no upstream the gateway is disabled and egress enforcement still
-runs.
+A workspace is refused if it is, contains, or is inside the home directory, ~/.ssh,
+~/.aws, Lima's instance store, or /. Symlinks are resolved before that check, so a
+link cannot stand in for one of them. --writable is a host-code-execution path
+rather than a convenience: an agent that can write .git/hooks, .git/config
+(core.fsmonitor, core.hooksPath), a Makefile or an .envrc gets code running on the
+operator's machine the next time git or make runs there.
+
+The model gateway has no hardcoded vendor: it forwards to whatever --model-upstream
+names and authenticates with the secret --model-key-env names. It speaks the
+OpenAI-compatible surface only - GET /models and POST /chat/completions, with
+Authorization: Bearer, over https - so a provider that authenticates differently
+needs a change here, not just a flag. With no upstream the gateway is disabled and
+egress enforcement still runs.
 `
 
+// exitError carries a child process's exit status up to main.
+//
+// It is returned rather than exiting where the failure happens, because os.Exit
+// skips deferred cleanup: the temp directories cmdCheck, cmdBroker and cmdProxy
+// defer away are only removed if the command function returns normally. Exiting
+// from inside them left crew-gates-* and crew-proxy-* directories behind whenever
+// a gate or a service exited non-zero.
+type exitError struct{ code int }
+
+func (e exitError) Error() string { return fmt.Sprintf("exit status %d", e.code) }
+
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	err := run(os.Args[1:])
+	var exit exitError
+	switch {
+	case errors.As(err, &exit):
+		// The child already wrote its own diagnostics; a "crew-sandbox:" prefix
+		// here would misattribute them.
+		os.Exit(exit.code)
+	case err != nil:
 		fmt.Fprintf(os.Stderr, "crew-sandbox: %v\n", err)
 		os.Exit(1)
 	}
@@ -153,22 +182,109 @@ func (f *guestFlags) guest() (lima.Guest, error) {
 	if err != nil {
 		return g, err
 	}
-	info, err := os.Stat(abs)
+	// Resolve before validating. A textual check on the path as typed is defeated
+	// by one symlink: `--workspace ./innocent` pointing at the home directory would
+	// pass every string comparison and mount the home directory.
+	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return g, fmt.Errorf("workspace %s: %w", abs, err)
+		return g, fmt.Errorf("workspace %s: %w", f.workspace, err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return g, fmt.Errorf("workspace %s: %w", resolved, err)
 	}
 	if !info.IsDir() {
-		return g, fmt.Errorf("workspace %s is not a directory", abs)
+		return g, fmt.Errorf("workspace %s is not a directory", resolved)
 	}
-	// The mount point mirrors the host path so a command's arguments mean the
-	// same thing inside and outside the guest. That is a convenience, not a
-	// security property: the guest still only sees this one directory.
+	if err := checkWorkspace(resolved); err != nil {
+		return g, err
+	}
+	// The mount uses the resolved path, so what the guest mounts is the directory
+	// that was checked rather than a link that could be repointed afterwards. The
+	// mount point mirrors it so a command's arguments mean the same on both sides.
 	g.Mounts = []lima.Mount{{
-		Location:   abs,
-		MountPoint: abs,
+		Location:   resolved,
+		MountPoint: resolved,
 		Writable:   f.writable,
 	}}
 	return g, nil
+}
+
+// forbiddenPath is a host path a workspace must never be, contain, or (for a
+// credential or state subtree) sit inside.
+type forbiddenPath struct {
+	path string
+	why  string
+	// subtree refuses a workspace that is merely inside this path. It is false for
+	// "/" and for the home directory: every path is inside /, and a directory inside
+	// home is the ordinary case this whole flag exists to allow. It is true for the
+	// credential stores, where a subdirectory is the same leak by a shorter path.
+	subtree bool
+}
+
+// forbiddenWorkspaces lists what a workspace must not touch. Each entry is either a
+// credential store the guest has no business reading, or state whose corruption
+// hands the guest the host.
+func forbiddenWorkspaces() []forbiddenPath {
+	var forbidden []forbiddenPath
+	add := func(path, why string, subtree bool) {
+		if path == "" {
+			return
+		}
+		forbidden = append(forbidden, forbiddenPath{path: path, why: why, subtree: subtree})
+	}
+	add("/", "the filesystem root", false)
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return forbidden
+	}
+	add(home, "the home directory", false)
+	add(filepath.Join(home, ".ssh"), "the SSH keys and config", true)
+	add(filepath.Join(home, ".aws"), "the AWS credentials", true)
+	// Lima keeps each instance's disk and definition under its store. A writable
+	// mount of it would let the guest rewrite the disk it is running from.
+	store := os.Getenv("LIMA_HOME")
+	if store == "" {
+		store = filepath.Join(home, ".lima")
+	}
+	add(store, "Lima's instance store", true)
+	return forbidden
+}
+
+// checkWorkspace refuses a workspace that is, contains, or is inside a forbidden
+// path. The caller has already resolved symlinks.
+//
+// The directions matter differently. A workspace that *contains* ~/.ssh lets the
+// guest read the operator's keys; one that *is inside* ~/.ssh is the same leak by a
+// shorter path; and one that contains Lima's store lets the guest rewrite the disk it
+// runs from. Being inside the home directory is deliberately fine, because that is
+// where a project normally lives.
+func checkWorkspace(resolved string) error {
+	for _, forbidden := range forbiddenWorkspaces() {
+		target := forbidden.path
+		if real, err := filepath.EvalSymlinks(target); err == nil {
+			target = real
+		}
+		switch {
+		case resolved == target:
+			return fmt.Errorf("workspace %s is %s; expose a directory that does not include it", resolved, forbidden.why)
+		case forbidden.subtree && within(resolved, target):
+			return fmt.Errorf("workspace %s is inside %s (%s); expose a directory outside it", resolved, target, forbidden.why)
+		case within(target, resolved):
+			return fmt.Errorf("workspace %s contains %s (%s); expose a directory that does not include it", resolved, target, forbidden.why)
+		}
+	}
+	return nil
+}
+
+// within reports whether child is parent or below it, comparing whole path
+// components so /a/bc is not treated as being inside /a/b.
+func within(child, parent string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func cmdRun(ctx context.Context, args []string) error {
@@ -191,16 +307,14 @@ func cmdRun(ctx context.Context, args []string) error {
 		return err
 	}
 
-	out, err := g.Run(argv, f.workdir)
-	fmt.Print(out)
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			os.Exit(exitErr.ExitCode())
-		}
-		return err
+	// Untrusted work runs as the unprivileged agent account; lima.Run applies that
+	// wrapper itself, so there is no way for a call site to forget it.
+	err = g.RunIO(ctx, argv, f.workdir, os.Stdin, os.Stdout, os.Stderr)
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitError{code: exitErr.ExitCode()}
 	}
-	return nil
+	return err
 }
 
 func cmdUp(ctx context.Context, args []string) error {
@@ -407,8 +521,10 @@ func cmdProxy(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if token, err := g.Run([]string{"sudo", "-n", "cat", "/etc/crew-model-token"}, ""); err == nil {
-		cfg.ModelToken = trimSpace(token)
+	// The token is 0644 by design, so the agent account can read it without sudo;
+	// Run already drops to agent, and a nested `sudo -n` would fail there.
+	if token, err := g.Run([]string{"cat", "/etc/crew-model-token"}, ""); err == nil {
+		cfg.ModelToken = strings.TrimSpace(token)
 	}
 
 	p, err := proxy.Command(ctx, cfg)
@@ -533,29 +649,37 @@ func secret(ctx context.Context, name string) (string, error) {
 	return value, nil
 }
 
-// runForeground runs a child process and waits for it, forwarding signals so a
-// Ctrl-C reaches the broker or proxy rather than orphaning it.
+// runForeground runs a child process to completion with the operator's own streams,
+// waits for it, and returns its exit status so the caller's deferred cleanup still
+// runs.
+//
+// Signals reach the child through the context it was built with: run() installs a
+// signal-aware context, so Ctrl-C cancels it and exec cancels the child. The
+// cancellation is set to SIGTERM with a grace period rather than exec's default
+// SIGKILL, because the broker and the proxy both have something to release when
+// asked politely - the broker's tokens live only in its memory.
 func runForeground(cmd *exec.Cmd) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
+	// Unconditionally, not "if unset": exec.CommandContext installs its own Cancel
+	// that calls Process.Kill, so a nil check would keep the SIGKILL. A process that
+	// has already exited reports ErrProcessDone, which is not a cancellation failure.
+	cmd.Cancel = func() error {
+		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		return nil
+	}
+	if cmd.WaitDelay == 0 {
+		cmd.WaitDelay = 10 * time.Second
+	}
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			os.Exit(exitErr.ExitCode())
+			return exitError{code: exitErr.ExitCode()}
 		}
 		return err
 	}
 	return nil
-}
-
-func trimSpace(s string) string {
-	start, end := 0, len(s)
-	for start < end && (s[start] == ' ' || s[start] == '\n' || s[start] == '\r' || s[start] == '\t') {
-		start++
-	}
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\n' || s[end-1] == '\r' || s[end-1] == '\t') {
-		end--
-	}
-	return s[start:end]
 }
