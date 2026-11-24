@@ -37,16 +37,22 @@ var ErrNotInstalled = errors.New("limactl not found on PATH")
 // did not write must run as AgentUser rather than as the Lima user.
 const AgentUser = "agent"
 
-// AsAgent wraps argv so the guest runs it as AgentUser instead of as the Lima
-// user. This is the same wrapper the gates use.
+// agentWrap is the sudo invocation that drops from the Lima user to AgentUser.
+const agentWrap = "sudo"
+
+// asAgent wraps argv so the guest runs it as AgentUser instead of as the Lima user.
+//
+// It is unexported on purpose: Run and RunIO wrap unconditionally, so there is no
+// way for a caller to run a guest command as the administration account by
+// forgetting a wrapper. That is the difference between a boundary and a convention.
 //
 // `sudo -n` fails closed: if the guest ever stopped permitting it, the command
 // fails rather than silently running as the administration account. `-H` points
 // HOME at the agent's home, so tool configuration and caches are the agent's
 // rather than the admin account's.
-func AsAgent(argv []string) []string {
+func asAgent(argv []string) []string {
 	wrapped := make([]string, 0, len(argv)+6)
-	wrapped = append(wrapped, "sudo", "-n", "-u", AgentUser, "-H", "--")
+	wrapped = append(wrapped, agentWrap, "-n", "-u", AgentUser, "-H", "--")
 	return append(wrapped, argv...)
 }
 
@@ -326,9 +332,14 @@ func (g Guest) shellArgs(argv []string, workdir string) []string {
 	return append(args, argv...)
 }
 
-// Run executes a command in the guest and returns its stdout. The command is
-// passed as argv, never through a shell, so a workspace path or an argument
-// containing spaces or quotes cannot become a second command.
+// Run executes a command in the guest as the unprivileged `agent` account and
+// returns its stdout. The command is passed as argv, never through a shell, so a
+// workspace path or an argument containing spaces or quotes cannot become a second
+// command.
+//
+// The agent wrapper is part of this call, not the caller's job: the Lima user is the
+// administration account with passwordless sudo, so a guest command that ran as the
+// Lima user would be one `sudo` from root.
 //
 // Use Run when the output is data the caller inspects; use RunIO when it is output
 // a human or an orchestrator is watching.
@@ -336,13 +347,13 @@ func (g Guest) Run(argv []string, workdir string) (string, error) {
 	if len(argv) == 0 {
 		return "", errors.New("no command given")
 	}
-	return g.run(g.shellArgs(argv, workdir)...)
+	return g.run(g.shellArgs(asAgent(argv), workdir)...)
 }
 
-// RunIO runs argv in the guest with the caller's streams wired straight through.
-// Output is forwarded as it is produced rather than buffered until the command
-// exits, stdin reaches the guest command, and stderr keeps its own stream instead
-// of being folded into the error.
+// RunIO runs argv in the guest as the unprivileged `agent` account, with the
+// caller's streams wired straight through. Output is forwarded as it is produced
+// rather than buffered until the command exits, stdin reaches the guest command, and
+// stderr keeps its own stream instead of being folded into the error.
 //
 // The context cancels the guest command. Cancellation sends SIGTERM and only kills
 // after a grace period: CommandContext's default is an immediate SIGKILL, which
@@ -352,7 +363,7 @@ func (g Guest) RunIO(ctx context.Context, argv []string, workdir string, stdin i
 	if len(argv) == 0 {
 		return errors.New("no command given")
 	}
-	cmd := exec.CommandContext(ctx, g.binary(), g.shellArgs(argv, workdir)...)
+	cmd := exec.CommandContext(ctx, g.binary(), g.shellArgs(asAgent(argv), workdir)...)
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr

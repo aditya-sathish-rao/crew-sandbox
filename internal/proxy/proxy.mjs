@@ -6,6 +6,7 @@
 // the allowlist. The one exception is the model gateway below, which exists so the
 // real model key can stay on the host.
 import crypto from "node:crypto";
+import dns from "node:dns/promises";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
@@ -72,6 +73,56 @@ const isAllowedHost = (hostname) => {
 // Two ports, because that is all a package manager or a git remote ever needs.
 // Anything else is a service the guest has no business reaching.
 const isAllowedPort = (portNumber) => portNumber === 443 || portNumber === 80;
+
+// SSRF guard. An allowlisted *name* is not an allowlisted *address*: the name can
+// resolve to the host's own loopback, to a private range, or to a link-local
+// metadata endpoint, and a name that resolved safely when it was checked can be
+// re-pointed before the connection is made. So the address is resolved once here,
+// checked, and then connected to directly - the connect never resolves the name
+// again, which is what closes the rebinding window rather than narrowing it.
+const isBlockedIPv4 = (address) => {
+  const [a, b] = address.split(".").map(Number);
+  if (a === 0 || a === 10 || a === 127) return true; // this host, private, loopback
+  if (a === 100 && b >= 64 && b <= 127) return true; // carrier-grade NAT
+  if (a === 169 && b === 254) return true; // link-local, incl. cloud metadata
+  if (a === 172 && b >= 16 && b <= 31) return true; // private
+  if (a === 192 && b === 168) return true; // private
+  if (a >= 224) return true; // multicast, reserved, broadcast
+  return false;
+};
+
+const isBlockedAddress = (address) => {
+  if (net.isIPv4(address)) return isBlockedIPv4(address);
+  const lower = address.toLowerCase();
+  if (lower === "::" || lower === "::1") return true;
+  if (lower.startsWith("::ffff:")) return isBlockedIPv4(lower.slice(7));
+  const first = lower.split(":")[0];
+  if (/^fe[89ab]/.test(first)) return true; // link-local
+  if (/^f[cd]/.test(first)) return true; // unique local
+  return false;
+};
+
+// resolveAllowed returns { address } or { reason }. Every address a name resolves to
+// has to be permitted, not just the one that would be connected to: a name with one
+// public and one private answer is a trick, not a coincidence.
+const resolveAllowed = async (hostname) => {
+  let addresses;
+  if (net.isIP(hostname)) {
+    addresses = [hostname];
+  } else {
+    try {
+      addresses = (
+        await dns.lookup(hostname, { all: true, verbatim: true })
+      ).map((entry) => entry.address);
+    } catch (error) {
+      return { reason: `unresolved ${error.code ?? error.message}` };
+    }
+  }
+  if (addresses.length === 0) return { reason: "no-address" };
+  const blocked = addresses.find(isBlockedAddress);
+  if (blocked) return { reason: `blocked-address ${blocked}` };
+  return { address: addresses[0] };
+};
 
 const log = (decision, target, from) =>
   console.error(
@@ -248,6 +299,32 @@ const replyJson = (response, status, payload) => {
   response.end(JSON.stringify(payload));
 };
 
+// The gateway's bounds. The guest's model token is world-readable inside the VM by
+// design, so it cannot be what limits abuse: a runaway agent that loops on the model
+// would spend the operator's quota until something stops it. These are deliberately
+// crude and set well above a normal coding session.
+const modelLimits = {
+  // A single request body. Prompts with images are the large case.
+  maxBodyBytes: 32 * 1024 * 1024,
+  // Requests per rolling minute for the one guest token.
+  requestsPerMinute: 120,
+};
+const modelUsage = new Map(); // token -> { windowStart, count }
+
+// overRateLimit counts this request against the token's minute and reports whether the
+// budget is spent. A request that is refused still counts: otherwise a client that
+// keeps hammering would never advance the window it is waiting on.
+const overRateLimit = (token) => {
+  const now = Date.now();
+  const usage = modelUsage.get(token);
+  if (!usage || now - usage.windowStart >= 60_000) {
+    modelUsage.set(token, { windowStart: now, count: 1 });
+    return false;
+  }
+  usage.count += 1;
+  return usage.count > modelLimits.requestsPerMinute;
+};
+
 const handleModel = (request, response) => {
   const from = request.socket.remoteAddress;
   const route = new URL(request.url, "http://crew-model");
@@ -262,6 +339,21 @@ const handleModel = (request, response) => {
   if (!tokenMatches(request.headers.authorization)) {
     log("DENY", `model-auth ${label}`, from);
     replyJson(response, 401, { error: "unauthorized" });
+    return;
+  }
+  if (overRateLimit(modelToken)) {
+    log("DENY", `model-rate ${label}`, from);
+    response.writeHead(429, {
+      "content-type": "application/json",
+      "retry-after": "60",
+    });
+    response.end(JSON.stringify({ error: "rate limited" }));
+    return;
+  }
+  const declared = Number(request.headers["content-length"] ?? 0);
+  if (Number.isFinite(declared) && declared > modelLimits.maxBodyBytes) {
+    log("DENY", `model-size ${label} ${declared}`, from);
+    replyJson(response, 413, { error: "request too large" });
     return;
   }
   const upstreamPath = modelRoutes.get(label);
@@ -302,6 +394,22 @@ const handleModel = (request, response) => {
     if (response.headersSent) response.destroy();
     else replyJson(response, 502, { error: "model upstream failed" });
   });
+  // Content-Length can lie or be absent (chunked), so the body is counted as it
+  // streams and the request is cut off at the same bound. Left unchecked, one upload
+  // of any size would be buffered and forwarded on the operator's quota.
+  let received = 0;
+  request.on("data", (chunk) => {
+    received += chunk.length;
+    if (received > modelLimits.maxBodyBytes) {
+      log("DENY", `model-size ${label} streaming`, from);
+      request.destroy();
+      if (!response.headersSent) {
+        replyJson(response, 413, { error: "request too large" });
+      } else {
+        response.destroy();
+      }
+    }
+  });
   request.pipe(upstream);
   response.on("close", () => {
     if (!upstream.destroyed) upstream.destroy();
@@ -309,7 +417,9 @@ const handleModel = (request, response) => {
   log("ALLOW", `model ${label}`, from);
 };
 
-const server = http.createServer((req, res) => {
+// handleEgress is the plain-HTTP route. Async because the destination has to be
+// resolved and checked before anything connects.
+const handleEgress = async (req, res) => {
   const from = req.socket.remoteAddress;
   let target;
   try {
@@ -330,16 +440,24 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  const resolved = await resolveAllowed(target.hostname);
+  if (!resolved.address) {
+    log("DENY", `${target.hostname}:${targetPort} ${resolved.reason}`, from);
+    res.writeHead(403).end();
+    return;
+  }
+
   // Host comes from the target, never from the guest. This route is the only
   // place a plain-HTTP request can be retargeted at a different virtual host on
-  // the same CDN address, so the guest's value must not survive.
+  // the same CDN address, so the guest's value must not survive. The connection
+  // goes to the address that was checked, while the Host header keeps the name.
   const headers = stripHopByHop(req.headers);
   headers.host = target.host;
 
-  log("ALLOW", `${target.hostname}:${targetPort}`, from);
+  log("ALLOW", `${target.hostname}:${targetPort} -> ${resolved.address}`, from);
   const upstream = http.request(
     {
-      host: target.hostname,
+      host: resolved.address,
       port: targetPort,
       method: req.method,
       path: `${target.pathname}${target.search}`,
@@ -350,8 +468,20 @@ const server = http.createServer((req, res) => {
       upstreamResponse.pipe(res);
     },
   );
-  upstream.on("error", () => res.writeHead(502).end());
+  upstream.on("error", () => {
+    if (res.headersSent) res.destroy();
+    else res.writeHead(502).end();
+  });
   req.pipe(upstream);
+};
+
+const server = http.createServer((req, res) => {
+  // A rejection inside an async handler would otherwise be unhandled and take the
+  // proxy down, which is a denial of service for every other tunnel.
+  handleEgress(req, res).catch(() => {
+    if (res.headersSent) res.destroy();
+    else res.writeHead(502).end();
+  });
 });
 
 // The gateway listens on its own port, so a request here can only be the model
@@ -367,9 +497,15 @@ const modelServer = http.createServer((req, res) => {
 });
 
 // tunnel: hand an already-validated first flight to the upstream and splice.
-const tunnel = (target, socket, firstFlight, sni, from) => {
-  log("ALLOW", `${target.hostname}:${target.port} sni=${sni}`, from);
-  const upstream = net.connect(target.port, target.hostname, () => {
+const tunnel = (target, socket, firstFlight, sni, from, address) => {
+  log(
+    "ALLOW",
+    `${target.hostname}:${target.port} -> ${address} sni=${sni}`,
+    from,
+  );
+  // net.connect gets the address that was already resolved and checked, never the
+  // hostname: asking the resolver a second time is what DNS rebinding exploits.
+  const upstream = net.connect(target.port, address, () => {
     upstream.write(firstFlight);
     upstream.pipe(socket);
     // pipe() resumes the socket, releasing anything that arrived while the
@@ -381,8 +517,9 @@ const tunnel = (target, socket, firstFlight, sni, from) => {
   socket.on("close", () => upstream.destroy());
 };
 
-server.on("connect", (req, socket, head) => {
+server.on("connect", async (req, socket, head) => {
   const from = req.socket.remoteAddress;
+  socket.on("error", () => socket.destroy());
   const target = splitTarget(req.url);
   // CONNECT is TLS only. A tunnel to port 80 would carry plain HTTP, whose Host
   // header is the very thing this route cannot see, so it would reopen the
@@ -394,6 +531,21 @@ server.on("connect", (req, socket, head) => {
   }
   const label = `${target.hostname}:${target.port}`;
   const expected = target.hostname.toLowerCase().replace(/\.$/, "");
+
+  // Resolve and check before the tunnel is announced, so a name pointing at the
+  // host's own loopback is refused without a byte reaching it. The address checked
+  // here is the address the tunnel later connects to: the SNI check and this one
+  // cannot disagree about which host they describe.
+  let resolved;
+  try {
+    resolved = await resolveAllowed(target.hostname);
+  } catch {
+    resolved = { reason: "resolve-failed" };
+  }
+  if (!resolved.address) {
+    deny(socket, "DENY", `${label} ${resolved.reason}`, from);
+    return;
+  }
 
   // The client will not send its ClientHello until the tunnel is established, so
   // the 200 has to come first. Nothing is forwarded upstream until the name in
@@ -435,11 +587,10 @@ server.on("connect", (req, socket, head) => {
     // resumes the stream into the upstream.
     socket.pause();
     socket.removeListener("data", onData);
-    tunnel(target, socket, buffered, named, from);
+    tunnel(target, socket, buffered, named, from, resolved.address);
   };
 
   socket.on("data", onData);
-  socket.on("error", () => socket.destroy());
   onData(Buffer.alloc(0));
 });
 
@@ -564,6 +715,41 @@ if (selftest) {
       `selftest: ${match ? "ok  " : "FAIL"} ${label} -> ${JSON.stringify(got)}`,
     );
   }
+  // The SSRF guard, on addresses and on names. These resolve through the system
+  // resolver but make no network connection: the question is only which answers the
+  // guard accepts, and a name that answers with loopback has to be refused or the
+  // allowlist names an address the guest must never reach.
+  const addressCases = [
+    ["loopback v4", "127.0.0.1", true],
+    ["loopback v6", "::1", true],
+    ["unspecified v4", "0.0.0.0", true],
+    ["link-local and cloud metadata", "169.254.169.254", true],
+    ["a private v4 range", "10.0.0.1", true],
+    ["a private v6 range", "fd00::1", true],
+    ["a public address", "93.184.216.34", false],
+  ];
+  for (const [label, address, blocked] of addressCases) {
+    const got = isBlockedAddress(address);
+    const match = got === blocked;
+    if (!match) ok = false;
+    console.error(
+      `selftest: ${match ? "ok  " : "FAIL"} ${label} -> blocked=${got}`,
+    );
+  }
+  const localhost = await resolveAllowed("localhost");
+  const localhostRefused =
+    !localhost.address && /^blocked-address /.test(localhost.reason ?? "");
+  if (!localhostRefused) ok = false;
+  console.error(
+    `selftest: ${localhostRefused ? "ok  " : "FAIL"} a name that resolves to loopback -> ${JSON.stringify(localhost)}`,
+  );
+  const literalLoopback = await resolveAllowed("127.0.0.1");
+  const literalRefused = !literalLoopback.address;
+  if (!literalRefused) ok = false;
+  console.error(
+    `selftest: ${literalRefused ? "ok  " : "FAIL"} a literal loopback address -> ${JSON.stringify(literalLoopback)}`,
+  );
+
   process.exit(ok ? 0 : 1);
 }
 

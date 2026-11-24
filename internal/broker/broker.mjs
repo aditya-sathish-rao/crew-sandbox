@@ -204,6 +204,14 @@ const readJson = (request) =>
     });
   });
 
+// A task id is a label, not free text. It is used as the map key and interpolated
+// into every log line this broker writes, so a newline in it would forge a log record
+// and an unbounded one is a memory bound an agent controls. The allowlist is the
+// narrow set that appears in a task id and never needs escaping.
+const taskIdPattern = /^[A-Za-z0-9._-]{1,128}$/;
+const validTask = (task) =>
+  typeof task === "string" && taskIdPattern.test(task);
+
 const reply = (response, status, payload) => {
   response.writeHead(status, { "content-type": "application/json" });
   response.end(payload === undefined ? "" : JSON.stringify(payload));
@@ -228,6 +236,13 @@ const server = http.createServer(async (request, response) => {
     const { task, repo } = body;
     if (!task || !repo) {
       reply(response, 400, { error: "task and repo are required" });
+      return;
+    }
+    if (!validTask(task)) {
+      console.error("DENY task=<invalid>");
+      reply(response, 400, {
+        error: "task must match [A-Za-z0-9._-]{1,128}",
+      });
       return;
     }
     if (!repos.includes(repo)) {
@@ -262,6 +277,11 @@ const server = http.createServer(async (request, response) => {
   const revokeRoute = /^\/token\/(.+)$/.exec(route.pathname);
   if (request.method === "DELETE" && revokeRoute) {
     const task = decodeURIComponent(revokeRoute[1]);
+    if (!validTask(task)) {
+      console.error("DENY task=<invalid>");
+      reply(response, 400, { error: "task must match [A-Za-z0-9._-]{1,128}" });
+      return;
+    }
     const held = issued.get(task);
     if (!held) {
       reply(response, 404, { error: `no token for ${task}` });

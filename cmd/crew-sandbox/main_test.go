@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -96,12 +97,23 @@ func TestRunRunsAsTheAgentUser(t *testing.T) {
 	}
 }
 
+// mountJSON renders a mount the way lima reports it, with the path resolved. The CLI
+// mounts the resolved directory, so an unresolved temp path would never match.
+func mountJSON(t *testing.T, dir string, writable bool) string {
+	t.Helper()
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return `{"location":"` + real + `","mountPoint":"` + real + `","writable":` + strconv.FormatBool(writable) + `}`
+}
+
 func TestRunRefusesAWritableMountItDidNotAskFor(t *testing.T) {
 	// An instance created earlier with --writable keeps that mount for its whole
 	// life. A later run that asks for no workspace must be refused rather than run
 	// against a writable host mount the operator believes is not attached.
 	dir := t.TempDir()
-	fakeLimactl(t, `{"location":"`+dir+`","mountPoint":"`+dir+`","writable":true}`)
+	fakeLimactl(t, mountJSON(t, dir, true))
 
 	err := run([]string{"run", "--", "true"})
 	if !errors.Is(err, lima.ErrMountsNotApplied) {
@@ -113,7 +125,7 @@ func TestRunRefusesToDowngradeAWritableMountToReadOnly(t *testing.T) {
 	// A read-only request against an existing writable mount is not satisfied: the
 	// guest would keep write access the operator asked it not to have.
 	dir := t.TempDir()
-	fakeLimactl(t, `{"location":"`+dir+`","mountPoint":"`+dir+`","writable":true}`)
+	fakeLimactl(t, mountJSON(t, dir, true))
 
 	err := run([]string{"run", "--workspace", dir, "--", "true"})
 	if !errors.Is(err, lima.ErrMountsNotApplied) {
@@ -125,7 +137,7 @@ func TestRunAcceptsTheMountItAlreadyHas(t *testing.T) {
 	// The same workspace on the second and later runs must work, not fail: the
 	// equality check is about what is attached, not about freshness.
 	dir := t.TempDir()
-	fakeLimactl(t, `{"location":"`+dir+`","mountPoint":"`+dir+`","writable":true}`)
+	fakeLimactl(t, mountJSON(t, dir, true))
 
 	if err := run([]string{"run", "--workspace", dir, "--writable", "--", "true"}); err != nil {
 		t.Fatalf("run rejected a mount the instance already has: %v", err)
@@ -159,5 +171,77 @@ func TestRunForegroundAsksPolitelyBeforeKilling(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("runForeground did not return after the context was cancelled")
+	}
+}
+
+func TestWorkspaceRefusals(t *testing.T) {
+	// A workspace is the one thing the guest can see of the host, so the paths that
+	// must never be one are refused by name rather than left to the operator.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, dir := range []string{".ssh", ".aws", "project"} {
+		if err := os.MkdirAll(filepath.Join(home, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := filepath.Join(home, "lima-store")
+	if err := os.MkdirAll(store, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LIMA_HOME", store)
+
+	cases := []struct{ name, workspace string }{
+		{"the filesystem root", "/"},
+		{"the home directory", home},
+		{"the SSH directory", filepath.Join(home, ".ssh")},
+		{"the AWS directory", filepath.Join(home, ".aws")},
+		{"a directory above home, which contains .ssh", filepath.Dir(home)},
+		{"Lima's instance store", store},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := run([]string{"run", "--workspace", c.workspace, "--", "true"})
+			if err == nil {
+				t.Fatalf("workspace %s was accepted", c.workspace)
+			}
+			if !strings.Contains(err.Error(), "workspace") {
+				t.Fatalf("unhelpful refusal for %s: %v", c.workspace, err)
+			}
+		})
+	}
+}
+
+func TestWorkspaceRefusesASymlinkToHome(t *testing.T) {
+	// The textual path is innocent; the resolved one is not. This is why the check
+	// runs after EvalSymlinks.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	link := filepath.Join(t.TempDir(), "innocent")
+	if err := os.Symlink(home, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := run([]string{"run", "--workspace", link, "--", "true"}); err == nil {
+		t.Fatal("a symlink that resolves to the home directory was accepted")
+	}
+}
+
+func TestWorkspaceMountUsesTheResolvedPath(t *testing.T) {
+	// The mount has to be the directory that was checked, not a link that could be
+	// repointed after the check. The fake reports the resolved path as the mount it
+	// already has, so this only passes if the resolved path is what gets mounted.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	real := filepath.Join(home, "work")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(home, "work-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	fakeLimactl(t, mountJSON(t, real, false))
+
+	if err := run([]string{"run", "--workspace", link, "--", "true"}); err != nil {
+		t.Fatalf("run with a symlinked workspace: %v", err)
 	}
 }

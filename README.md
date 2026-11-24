@@ -31,13 +31,18 @@ Concretely, the boundary is four things:
 
 - **A VM with `mounts: []`.** No host directory is mounted unless `--workspace` is given, so
   `/Users` does not exist inside the guest. A workspace mount is opt-in per run and read-only
-  unless `--writable` is passed.
+  unless `--writable` is passed. `--writable` is a host-code-execution path, not just a
+  convenience: an agent that can write `.git/hooks`, `.git/config` (`core.fsmonitor`,
+  `core.hooksPath`), a `Makefile` or an `.envrc` gets code running on your Mac the next time
+  you run `git` or `make` in that directory.
 - **An nftables default-deny.** All input and output is dropped except loopback and the
   egress proxy and model-gateway ports on the host gateway. The broker's port is
   deliberately not opened.
-- **A host proxy that names hosts.** It admits only the hostnames in the egress allowlist
-  (`internal/allowlist/egress-allow.example` unless `--egress-allow` supplies one), and it
-  reads the TLS handshake so an allowlisted CDN address cannot reach another site behind it.
+- **A host proxy that names hosts and addresses.** It admits only the hostnames in the egress
+  allowlist (`internal/allowlist/egress-allow.example` unless `--egress-allow` supplies one),
+  reads the TLS handshake so an allowlisted CDN address cannot reach another site behind it,
+  and resolves each name itself, refusing loopback, link-local, private and CGNAT addresses
+  before connecting to the address it checked.
 - **A host broker that holds the key.** GitHub tokens are minted per task and never handed to
   the guest as a long-lived credential.
 

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,10 +89,88 @@ func TestAsAgentRunsAsTheUnprivilegedUser(t *testing.T) {
 	// The Lima user is the administration account and keeps passwordless sudo, so
 	// untrusted work must be wrapped as the unprivileged account or it runs as root
 	// equivalent. `-n` matters: it fails closed instead of prompting.
-	got := AsAgent([]string{"go", "test", "./..."})
+	got := asAgent([]string{"go", "test", "./..."})
 	want := []string{"sudo", "-n", "-u", "agent", "-H", "--", "go", "test", "./..."}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("AsAgent = %v, want %v", got, want)
+		t.Fatalf("asAgent = %v, want %v", got, want)
+	}
+}
+
+func TestEveryGuestEntryPointWrapsAsAgent(t *testing.T) {
+	// asAgent is unexported and both exported entry points apply it, so no caller can
+	// run a guest command as the Lima user by forgetting a wrapper. That is the whole
+	// point of baking it in: a boundary, not a convention. If a third entry point is
+	// ever added, this test is where it shows up as unwrapped.
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "argv.log")
+	path := filepath.Join(dir, "limactl")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + logPath + "\nexit 0\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	g := Guest{Name: "crew-test", Limactl: path}
+	if _, err := g.Run([]string{"id", "-un"}, ""); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if err := g.RunIO(context.Background(), []string{"id", "-un"}, "", strings.NewReader(""), io.Discard, io.Discard); err != nil {
+		t.Fatalf("RunIO: %v", err)
+	}
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(logged)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want two invocations, got %d: %q", len(lines), logged)
+	}
+	for _, line := range lines {
+		if !strings.Contains(line, "sudo -n -u agent -H --") {
+			t.Fatalf("a guest command ran without the agent wrapper: %s", line)
+		}
+	}
+}
+
+func TestOnlyThisPackageInvokesLimactl(t *testing.T) {
+	// The package doc claims this is the only package that knows the VM exists. It is
+	// also the only place the agent wrapper is applied, so any other package shelling
+	// out to limactl directly would bypass it and run as the administration account.
+	// Scan for that rather than trusting the claim.
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if name := entry.Name(); name == ".git" || name == "graphify-out" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		if strings.Contains(path, string(filepath.Separator)+"internal"+string(filepath.Separator)+"lima"+string(filepath.Separator)) {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for number, line := range strings.Split(string(content), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue
+			}
+			if strings.Contains(strings.ToLower(line), "limactl") {
+				t.Errorf("%s:%d invokes limactl outside internal/lima, which is where the agent wrapper lives: %s", path, number+1, strings.TrimSpace(line))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

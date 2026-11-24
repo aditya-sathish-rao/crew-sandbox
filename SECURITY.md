@@ -82,6 +82,14 @@ allowlist mean what it says:
 - **Plain HTTP:** the guest's `Host` header is discarded and set from the
   destination, so a request cannot be retargeted to another site on the same CDN
   address.
+- **Addresses, not just names:** the proxy resolves an allowlisted name itself and
+  refuses the tunnel or request if any answer is loopback, link-local (including the
+  cloud metadata address), private, CGNAT or multicast, then connects to the address
+  it checked rather than the name. A name that resolved somewhere harmless and is
+  re-pointed before the connect therefore cannot reach the host - the connect never
+  asks the resolver a second time. The model gateway's upstream is exempt on purpose:
+  it is operator configuration, and a model server on the operator's own loopback is a
+  legitimate upstream.
 - **TLS:** the proxy reads the ClientHello and refuses the tunnel unless the SNI
   name is exactly the name that was allowed. A CONNECT proxy cannot see inside
   TLS, so without this check an allowlisted CDN address would reach any site
@@ -100,7 +108,10 @@ CONNECT proxy. It holds the model key and replaces the `Authorization` header, s
 guest's model client reaches the provider without ever holding the key. The listener
 is not opened unless the key, the guest's token and an upstream are all configured.
 Keeping it off the proxy's socket means a bug in either route cannot expose the
-other, and the guest firewall names both ports explicitly. A client that routes the
+other, and the guest firewall names both ports explicitly. The gateway is bounded
+because the guest's token is world-readable by design and so cannot be what limits
+abuse: a request body is capped at 32 MiB, counted while it streams so a chunked body
+is not exempt, and the token is limited to 120 requests a minute. A client that routes the
 gateway through the proxy is still refused, which is why every login shell sets
 `no_proxy=host.lima.internal`.
 

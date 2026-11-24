@@ -42,7 +42,8 @@ const usage = `usage: crew-sandbox <command> [flags] [-- args]
 
 run flags:
   --workspace DIR   host directory to expose to the guest (default: none)
-  --writable        expose the workspace read-write (default: read-only)
+  --writable        expose the workspace read-write; a writable workspace is host code
+                    execution (see the note after this list)
   --name NAME       Lima instance name (default: crew-sandbox)
   --workdir DIR     directory inside the guest to run in
 
@@ -76,7 +77,15 @@ check phases:
 
 The guest sees nothing of the host unless --workspace is given. That is the
 boundary: a workspace mount is the one deliberate exception, and it is read-only
-unless --writable is passed.
+unless --writable is passed. Commands run as the unprivileged agent account, never
+as the Lima admin account.
+
+A workspace is refused if it is, contains, or is inside the home directory, ~/.ssh,
+~/.aws, Lima's instance store, or /. Symlinks are resolved before that check, so a
+link cannot stand in for one of them. --writable is a host-code-execution path
+rather than a convenience: an agent that can write .git/hooks, .git/config
+(core.fsmonitor, core.hooksPath), a Makefile or an .envrc gets code running on the
+operator's machine the next time git or make runs there.
 
 The model gateway has no hardcoded vendor: it forwards to whatever --model-upstream
 names and authenticates with the secret --model-key-env names. It speaks the
@@ -173,22 +182,109 @@ func (f *guestFlags) guest() (lima.Guest, error) {
 	if err != nil {
 		return g, err
 	}
-	info, err := os.Stat(abs)
+	// Resolve before validating. A textual check on the path as typed is defeated
+	// by one symlink: `--workspace ./innocent` pointing at the home directory would
+	// pass every string comparison and mount the home directory.
+	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return g, fmt.Errorf("workspace %s: %w", abs, err)
+		return g, fmt.Errorf("workspace %s: %w", f.workspace, err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return g, fmt.Errorf("workspace %s: %w", resolved, err)
 	}
 	if !info.IsDir() {
-		return g, fmt.Errorf("workspace %s is not a directory", abs)
+		return g, fmt.Errorf("workspace %s is not a directory", resolved)
 	}
-	// The mount point mirrors the host path so a command's arguments mean the
-	// same thing inside and outside the guest. That is a convenience, not a
-	// security property: the guest still only sees this one directory.
+	if err := checkWorkspace(resolved); err != nil {
+		return g, err
+	}
+	// The mount uses the resolved path, so what the guest mounts is the directory
+	// that was checked rather than a link that could be repointed afterwards. The
+	// mount point mirrors it so a command's arguments mean the same on both sides.
 	g.Mounts = []lima.Mount{{
-		Location:   abs,
-		MountPoint: abs,
+		Location:   resolved,
+		MountPoint: resolved,
 		Writable:   f.writable,
 	}}
 	return g, nil
+}
+
+// forbiddenPath is a host path a workspace must never be, contain, or (for a
+// credential or state subtree) sit inside.
+type forbiddenPath struct {
+	path string
+	why  string
+	// subtree refuses a workspace that is merely inside this path. It is false for
+	// "/" and for the home directory: every path is inside /, and a directory inside
+	// home is the ordinary case this whole flag exists to allow. It is true for the
+	// credential stores, where a subdirectory is the same leak by a shorter path.
+	subtree bool
+}
+
+// forbiddenWorkspaces lists what a workspace must not touch. Each entry is either a
+// credential store the guest has no business reading, or state whose corruption
+// hands the guest the host.
+func forbiddenWorkspaces() []forbiddenPath {
+	var forbidden []forbiddenPath
+	add := func(path, why string, subtree bool) {
+		if path == "" {
+			return
+		}
+		forbidden = append(forbidden, forbiddenPath{path: path, why: why, subtree: subtree})
+	}
+	add("/", "the filesystem root", false)
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return forbidden
+	}
+	add(home, "the home directory", false)
+	add(filepath.Join(home, ".ssh"), "the SSH keys and config", true)
+	add(filepath.Join(home, ".aws"), "the AWS credentials", true)
+	// Lima keeps each instance's disk and definition under its store. A writable
+	// mount of it would let the guest rewrite the disk it is running from.
+	store := os.Getenv("LIMA_HOME")
+	if store == "" {
+		store = filepath.Join(home, ".lima")
+	}
+	add(store, "Lima's instance store", true)
+	return forbidden
+}
+
+// checkWorkspace refuses a workspace that is, contains, or is inside a forbidden
+// path. The caller has already resolved symlinks.
+//
+// The directions matter differently. A workspace that *contains* ~/.ssh lets the
+// guest read the operator's keys; one that *is inside* ~/.ssh is the same leak by a
+// shorter path; and one that contains Lima's store lets the guest rewrite the disk it
+// runs from. Being inside the home directory is deliberately fine, because that is
+// where a project normally lives.
+func checkWorkspace(resolved string) error {
+	for _, forbidden := range forbiddenWorkspaces() {
+		target := forbidden.path
+		if real, err := filepath.EvalSymlinks(target); err == nil {
+			target = real
+		}
+		switch {
+		case resolved == target:
+			return fmt.Errorf("workspace %s is %s; expose a directory that does not include it", resolved, forbidden.why)
+		case forbidden.subtree && within(resolved, target):
+			return fmt.Errorf("workspace %s is inside %s (%s); expose a directory outside it", resolved, target, forbidden.why)
+		case within(target, resolved):
+			return fmt.Errorf("workspace %s contains %s (%s); expose a directory that does not include it", resolved, target, forbidden.why)
+		}
+	}
+	return nil
+}
+
+// within reports whether child is parent or below it, comparing whole path
+// components so /a/bc is not treated as being inside /a/b.
+func within(child, parent string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func cmdRun(ctx context.Context, args []string) error {
@@ -211,11 +307,9 @@ func cmdRun(ctx context.Context, args []string) error {
 		return err
 	}
 
-	// Untrusted work runs as the unprivileged agent account. The Lima user is the
-	// administration account and keeps passwordless sudo, so running the command as
-	// the Lima user would hand the guest's root to whatever the agent was asked to
-	// run. Every gate uses the same wrapper.
-	err = g.RunIO(ctx, lima.AsAgent(argv), f.workdir, os.Stdin, os.Stdout, os.Stderr)
+	// Untrusted work runs as the unprivileged agent account; lima.Run applies that
+	// wrapper itself, so there is no way for a call site to forget it.
+	err = g.RunIO(ctx, argv, f.workdir, os.Stdin, os.Stdout, os.Stderr)
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		return exitError{code: exitErr.ExitCode()}
@@ -427,7 +521,9 @@ func cmdProxy(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if token, err := g.Run([]string{"sudo", "-n", "cat", "/etc/crew-model-token"}, ""); err == nil {
+	// The token is 0644 by design, so the agent account can read it without sudo;
+	// Run already drops to agent, and a nested `sudo -n` would fail there.
+	if token, err := g.Run([]string{"cat", "/etc/crew-model-token"}, ""); err == nil {
 		cfg.ModelToken = strings.TrimSpace(token)
 	}
 
