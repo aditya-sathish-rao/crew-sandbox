@@ -78,10 +78,12 @@ The guest sees nothing of the host unless --workspace is given. That is the
 boundary: a workspace mount is the one deliberate exception, and it is read-only
 unless --writable is passed.
 
-The model gateway is provider-agnostic. It forwards to whatever --model-upstream
-names and authenticates with the secret --model-key-env names, so no vendor is
-hardcoded. With no upstream the gateway is disabled and egress enforcement still
-runs.
+The model gateway has no hardcoded vendor: it forwards to whatever --model-upstream
+names and authenticates with the secret --model-key-env names. It speaks the
+OpenAI-compatible surface only - GET /models and POST /chat/completions, with
+Authorization: Bearer, over https - so a provider that authenticates differently
+needs a change here, not just a flag. With no upstream the gateway is disabled and
+egress enforcement still runs.
 `
 
 // exitError carries a child process's exit status up to main.
@@ -551,13 +553,31 @@ func secret(ctx context.Context, name string) (string, error) {
 	return value, nil
 }
 
-// runForeground runs a child process and waits for it, forwarding signals so a
-// Ctrl-C reaches the broker or proxy rather than orphaning it, and returns its exit
-// status so the caller's deferred cleanup still runs.
+// runForeground runs a child process to completion with the operator's own streams,
+// waits for it, and returns its exit status so the caller's deferred cleanup still
+// runs.
+//
+// Signals reach the child through the context it was built with: run() installs a
+// signal-aware context, so Ctrl-C cancels it and exec cancels the child. The
+// cancellation is set to SIGTERM with a grace period rather than exec's default
+// SIGKILL, because the broker and the proxy both have something to release when
+// asked politely - the broker's tokens live only in its memory.
 func runForeground(cmd *exec.Cmd) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
+	// Unconditionally, not "if unset": exec.CommandContext installs its own Cancel
+	// that calls Process.Kill, so a nil check would keep the SIGKILL. A process that
+	// has already exited reports ErrProcessDone, which is not a cancellation failure.
+	cmd.Cancel = func() error {
+		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		return nil
+	}
+	if cmd.WaitDelay == 0 {
+		cmd.WaitDelay = 10 * time.Second
+	}
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {

@@ -8,6 +8,18 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 
+// A rejection nobody handled has always terminated this process by default; make it
+// explicit so the log says why. It matters more here than in most services: every
+// GitHub token this broker minted lives only in its memory, so a death that the log
+// does not explain is a death that strands credentials. Individual routes still
+// contain their own failures - this is the backstop for the ones that do not.
+process.on("unhandledRejection", (reason) => {
+  console.error(
+    `crew-broker: unhandled rejection, exiting: ${reason?.stack ?? reason}`,
+  );
+  process.exit(1);
+});
+
 const env = process.env;
 const port = Number(env.CREW_BROKER_PORT ?? 3129);
 const appId = env.CREW_APP_ID;

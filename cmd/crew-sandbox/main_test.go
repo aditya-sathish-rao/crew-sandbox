@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aditya-sathish-rao/crew-sandbox/internal/lima"
 )
@@ -126,5 +129,35 @@ func TestRunAcceptsTheMountItAlreadyHas(t *testing.T) {
 
 	if err := run([]string{"run", "--workspace", dir, "--writable", "--", "true"}); err != nil {
 		t.Fatalf("run rejected a mount the instance already has: %v", err)
+	}
+}
+
+func TestRunForegroundAsksPolitelyBeforeKilling(t *testing.T) {
+	// The broker and the proxy both release credentials when asked to stop - the
+	// broker's tokens exist only in its memory - so a cancelled service has to get
+	// SIGTERM and a grace period, not exec's default SIGKILL. The child here traps
+	// TERM and exits 42: seeing 42 instead of a signal death is the proof.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c",
+		`trap 'exit 42' TERM; while :; do sleep 0.02; done`)
+	cmd.WaitDelay = 2 * time.Second
+
+	done := make(chan error, 1)
+	go func() { done <- runForeground(cmd) }()
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		var exit exitError
+		if !errors.As(err, &exit) {
+			t.Fatalf("runForeground returned %v, want an exit status", err)
+		}
+		if exit.code != 42 {
+			t.Fatalf("exit code = %d, want 42: the SIGTERM handler did not run", exit.code)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("runForeground did not return after the context was cancelled")
 	}
 }

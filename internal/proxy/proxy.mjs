@@ -136,6 +136,11 @@ const parseClientHelloSni = (buffer) => {
   if (extensionsEnd > end) return no("extensions-overrun");
   at += 2;
 
+  // Every extension is scanned, not just up to server_name. Returning as soon as
+  // the SNI is found would miss an encrypted_client_hello extension that follows
+  // it, and ECH is the one extension that can hide the real destination from this
+  // check.
+  let sni = null;
   while (at + 4 <= extensionsEnd) {
     const type = buffer.readUInt16BE(at);
     const length = buffer.readUInt16BE(at + 2);
@@ -152,14 +157,19 @@ const parseClientHelloSni = (buffer) => {
       ) {
         return no("sni-malformed");
       }
-      return {
-        status: "ok",
-        sni: buffer.toString("latin1", body + 5, body + 5 + nameLength),
-      };
+      if (sni === null) {
+        sni = buffer.toString("latin1", body + 5, body + 5 + nameLength);
+      }
+    } else if (type === 0xfe0d) {
+      // Encrypted ClientHello. The outer server_name becomes a front for a name
+      // inside the encrypted payload, which this proxy cannot read, so the SNI it
+      // just checked would say nothing about where the client is actually going.
+      // Refuse rather than admit a destination it cannot name.
+      return no("ech");
     }
     at = body + length;
   }
-  return { status: "ok", sni: null };
+  return { status: "ok", sni };
 };
 
 // The model gateway. The guest's model client points its provider at
@@ -437,7 +447,7 @@ server.on("connect", (req, socket, head) => {
 // handshake is built here byte by byte, so a wrong offset or a missed bounds
 // check fails the build rather than a live tunnel.
 if (selftest) {
-  const clientHello = (sni, { split = false } = {}) => {
+  const clientHello = (sni, { split = false, ech = false } = {}) => {
     const name = sni ? Buffer.from(sni, "latin1") : Buffer.alloc(0);
     const sniBody = sni
       ? Buffer.concat([
@@ -448,17 +458,28 @@ if (selftest) {
         ])
       : Buffer.alloc(0);
     if (sni) sniBody.writeUInt16BE(sniBody.length - 2, 0);
-    const extensions = sni
+    // An encrypted_client_hello extension, appended after server_name so the case
+    // also proves the parser scans past the SNI rather than returning at it.
+    const echExtension = ech
       ? Buffer.concat([
-          Buffer.from([
-            0x00,
-            0x00,
-            (sniBody.length >> 8) & 0xff,
-            sniBody.length & 0xff,
-          ]),
-          sniBody,
+          Buffer.from([0xfe, 0x0d, 0x00, 0x04]),
+          Buffer.from([0x01, 0x02, 0x03, 0x04]),
         ])
       : Buffer.alloc(0);
+    const extensions = Buffer.concat([
+      sni
+        ? Buffer.concat([
+            Buffer.from([
+              0x00,
+              0x00,
+              (sniBody.length >> 8) & 0xff,
+              sniBody.length & 0xff,
+            ]),
+            sniBody,
+          ])
+        : Buffer.alloc(0),
+      echExtension,
+    ]);
     const body = Buffer.concat([
       Buffer.from([0x03, 0x03]), // legacy_version
       Buffer.alloc(32, 0x11), // random
@@ -524,6 +545,11 @@ if (selftest) {
       "an extension block past the end",
       lyingExtensions,
       { status: "no", reason: "extensions-overrun" },
+    ],
+    [
+      "an encrypted ClientHello",
+      clientHello("registry.npmjs.org", { ech: true }),
+      { status: "no", reason: "ech" },
     ],
   ];
   let ok = true;

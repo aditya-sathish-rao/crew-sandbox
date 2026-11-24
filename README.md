@@ -327,7 +327,7 @@ including both `.mjs` files with `node --check` — a prettier check on those tw
 an evaluation of the guest configuration, and the proxy's and broker's own `--selftest`:
 
 ```console
-$ crew-sandbox proxy --selftest    # 7 ClientHello parser cases
+$ crew-sandbox proxy --selftest    # 8 ClientHello parser cases
 $ crew-sandbox broker --selftest   # JWT signing against the configured key
 ```
 

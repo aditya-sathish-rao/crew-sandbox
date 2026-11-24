@@ -86,6 +86,9 @@ allowlist mean what it says:
   name is exactly the name that was allowed. A CONNECT proxy cannot see inside
   TLS, so without this check an allowlisted CDN address would reach any site
   behind that CDN. A malformed handshake costs one tunnel, not the process.
+  A ClientHello that carries the `encrypted_client_hello` extension is refused
+  outright: its outer SNI is a front for a name inside the encrypted payload, so
+  the name the proxy checked would say nothing about where the client is going.
   This is what makes the allowlist mean something, but it is not a guarantee about
   what the client says inside the tunnel: a CDN that routes on the `Host` header
   rather than the SNI still allows domain fronting under an allowed name, and a
@@ -172,7 +175,7 @@ or `SKIP` per attempt rather than pass/fail, and `--redteam-log FILE` keeps the 
 — the evidence an ADR cites. It never prints a secret value, only the name or path where
 one was found.
 
-The proxy and broker each carry a `--selftest` that runs without a VM: seven
+The proxy and broker each carry a `--selftest` that runs without a VM: eight
 ClientHello parser cases for the proxy, and the signing path for the broker. Those are
 what `nix flake check` runs, along with the unit tests (which include `node --check` on
 both scripts) and a prettier check; the gates above are not, because
@@ -247,7 +250,8 @@ on tmpfs and treating a failed copy as a named tampering failure.
   and then name a different site in the `Host` header inside the tunnel, which some
   CDNs still route. The SNI check is what stops an allowlisted CDN address reaching
   arbitrary sites; it says nothing about what the client sends once the tunnel is
-  open.
+  open. Encrypted ClientHello used to be a third way, hiding the real name behind a
+  permitted outer SNI; the handshake is now refused rather than admitted.
 - **The workspace mount is a real widening.** A writable mount lets the guest modify
   host files. It is read-only by default for that reason.
 - **No per-task authentication on the broker.** Until it exists, the broker is an

@@ -356,7 +356,14 @@ func (g Guest) RunIO(ctx context.Context, argv []string, workdir string, stdin i
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.Cancel = func() error {
+		// A guest command that has already exited reports ErrProcessDone; that is not
+		// a cancellation failure, and propagating it would replace the exit status.
+		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		return nil
+	}
 	cmd.WaitDelay = 10 * time.Second
 	if err := cmd.Run(); err != nil {
 		// No captured stderr: it went to the caller's stream. Wrap rather than
