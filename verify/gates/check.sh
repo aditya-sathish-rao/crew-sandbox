@@ -241,6 +241,30 @@ stop_probe_listener() {
   probe_started=0
 }
 
+# probe_run_as_agent <label>: the documented entry point, end to end.
+#
+# Every other assertion in this file runs its own command as `agent` through
+# `sudo -n -u agent -H`. That is what let `crew-sandbox run` execute as the Lima
+# administration account for so long without a single gate noticing: the gates
+# tested the account they wanted, never the account the operator's entry point
+# actually used. This probe asks the binary itself who it is.
+#
+# `-H` is not used here on purpose. The point is what `run` does by default, with no
+# help from the caller, so the only thing passed is the instance name.
+probe_run_as_agent() {
+  local label=$1 who
+  if ! who=$("$self" run --name "$name" -- id -un 2>&1); then
+    flunk "$label (crew-sandbox run failed: ${who})"
+    return
+  fi
+  who=$(printf '%s' "$who" | tr -d '[:space:]')
+  if [[ "$who" == "agent" ]]; then
+    pass "$label"
+  else
+    flunk "$label (the command ran as '${who}', not 'agent')"
+  fi
+}
+
 # probe_no_forward <bind-address> <label>: start a listener inside the guest as
 # `agent` and require the host's loopback to stay empty.
 #
@@ -351,6 +375,9 @@ phase_guest() {
   # is asserted from here, against a listener the gate starts as `agent`.
   probe_no_forward 0.0.0.0 "a guest listener on every address stays off the host"
   probe_no_forward 127.0.0.1 "a guest listener on loopback stays off the host"
+  # And the entry point itself runs what it is given as `agent`, not as the
+  # administration account every other gate wraps its own command around.
+  probe_run_as_agent "crew-sandbox run executes the command as agent, not as the Lima user"
   [[ "$fail" -eq 0 ]] || rc=1
   return "$rc"
 }

@@ -162,7 +162,7 @@ different reasons to stay up, and those reasons point the same way.
 ## Sources read for this record
 
 `nix/modules/darwin.nix` · `nix/checks/darwin.nix` · `docs/darwin-module.md` ·
-`docs/crew-sandbox-plan.md` (§Shape B, §Phase 4) · `cmd/crew-sandbox/main.go` ·
+`docs/archive/crew-sandbox-plan.md` (§Shape B, §Phase 4) · `cmd/crew-sandbox/main.go` ·
 `internal/proxy/{proxy.go,proxy.mjs}` · `internal/broker/{broker.go,broker.mjs}` ·
 `internal/vault/vault.go` · `internal/lima/lima.yaml` · `verify/gates/check.sh` ·
-`SECURITY.md` §3.5 · `docs/crew-sandbox-review.md` (C1, H4)
+`SECURITY.md` §3.5 · `docs/archive/crew-sandbox-review.md` (C1, H4)

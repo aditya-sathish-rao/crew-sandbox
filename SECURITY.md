@@ -82,23 +82,47 @@ allowlist mean what it says:
 - **Plain HTTP:** the guest's `Host` header is discarded and set from the
   destination, so a request cannot be retargeted to another site on the same CDN
   address.
+- **Addresses, not just names:** the proxy resolves an allowlisted name itself and
+  refuses the tunnel or request if any answer is loopback, link-local (including the
+  cloud metadata address), private, CGNAT or multicast, then connects to the address
+  it checked rather than the name. A name that resolved somewhere harmless and is
+  re-pointed before the connect therefore cannot reach the host - the connect never
+  asks the resolver a second time. The model gateway's upstream is exempt on purpose:
+  it is operator configuration, and a model server on the operator's own loopback is a
+  legitimate upstream.
 - **TLS:** the proxy reads the ClientHello and refuses the tunnel unless the SNI
   name is exactly the name that was allowed. A CONNECT proxy cannot see inside
   TLS, so without this check an allowlisted CDN address would reach any site
   behind that CDN. A malformed handshake costs one tunnel, not the process.
+  A ClientHello that carries the `encrypted_client_hello` extension is refused
+  outright: its outer SNI is a front for a name inside the encrypted payload, so
+  the name the proxy checked would say nothing about where the client is going.
+  This is what makes the allowlist mean something, but it is not a guarantee about
+  what the client says inside the tunnel: a CDN that routes on the `Host` header
+  rather than the SNI still allows domain fronting under an allowed name, and a
+  client that skips certificate validation can talk to whatever answers on the
+  allowlisted address. Both limits are stated below.
 
 The model gateway is a separate listener on 127.0.0.1:3130, not a route on the
 CONNECT proxy. It holds the model key and replaces the `Authorization` header, so the
 guest's model client reaches the provider without ever holding the key. The listener
 is not opened unless the key, the guest's token and an upstream are all configured.
 Keeping it off the proxy's socket means a bug in either route cannot expose the
-other, and the guest firewall names both ports explicitly. A client that routes the
+other, and the guest firewall names both ports explicitly. The gateway is bounded
+because the guest's token is world-readable by design and so cannot be what limits
+abuse: a request body is capped at 32 MiB, counted while it streams so a chunked body
+is not exempt, and the token is limited to 120 requests a minute. A client that routes the
 gateway through the proxy is still refused, which is why every login shell sets
 `no_proxy=host.lima.internal`.
 
-The gateway is provider-agnostic. The upstream URL and the secret name are settings,
-not constants, so the same gateway serves any provider and no vendor is hardcoded.
-With no upstream configured the gateway is disabled and the vault is not consulted.
+The gateway treats the provider as a setting rather than a constant: the upstream URL
+and the secret name are configuration, so no vendor is hardcoded and switching
+provider is a flag, not a code change. It speaks one surface, though - `GET /models`
+and `POST /chat/completions`, authenticated with `Authorization: Bearer`, over https -
+so it fronts OpenAI-compatible providers. A provider that authenticates with a
+different header (`x-api-key`) or serves different routes needs a change here, not
+just a flag. With no upstream configured the gateway is disabled and the vault is not
+consulted.
 
 ### 3.5 Credentials are brokered, never handed over
 
@@ -162,7 +186,7 @@ or `SKIP` per attempt rather than pass/fail, and `--redteam-log FILE` keeps the 
 — the evidence an ADR cites. It never prints a secret value, only the name or path where
 one was found.
 
-The proxy and broker each carry a `--selftest` that runs without a VM: seven
+The proxy and broker each carry a `--selftest` that runs without a VM: eight
 ClientHello parser cases for the proxy, and the signing path for the broker. Those are
 what `nix flake check` runs, along with the unit tests (which include `node --check` on
 both scripts) and a prettier check; the gates above are not, because
@@ -231,8 +255,14 @@ on tmpfs and treating a failed copy as a named tampering failure.
   `model` gate fails until `~/.pi/agent/models.json` and `settings.json` exist, which
   only a successful activation produces; it does not compare generation identities.
 - **A CONNECT proxy cannot see inside TLS.** The guarantee is "only allowlisted
-  hostnames", not "only their ordinary traffic". A client that skips certificate
-  validation can present an allowed SNI and talk to whatever answers.
+  hostnames", not "only their ordinary traffic". A client can use a permitted name
+  for something else in two ways: it can skip certificate validation and talk to
+  whatever answers on that address, or it can domain-front - present the allowed SNI
+  and then name a different site in the `Host` header inside the tunnel, which some
+  CDNs still route. The SNI check is what stops an allowlisted CDN address reaching
+  arbitrary sites; it says nothing about what the client sends once the tunnel is
+  open. Encrypted ClientHello used to be a third way, hiding the real name behind a
+  permitted outer SNI; the handshake is now refused rather than admitted.
 - **The workspace mount is a real widening.** A writable mount lets the guest modify
   host files. It is read-only by default for that reason.
 - **No per-task authentication on the broker.** Until it exists, the broker is an

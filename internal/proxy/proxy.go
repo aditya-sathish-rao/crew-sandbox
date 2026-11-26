@@ -23,10 +23,12 @@ import (
 var script []byte
 
 // Provider describes the model provider the gateway forwards to. It is a setting,
-// not a constant: the gateway is provider-agnostic, so the operator names the
-// upstream. Nothing here assumes a vendor. The secret that authenticates it is
-// resolved by the caller and passed as Config.ModelKey; this package never reads a
-// vault.
+// not a constant: the operator names the upstream, so no vendor is hardcoded here.
+// The surface is not general, though - the script serves GET /models and
+// POST /chat/completions with Authorization: Bearer over https, which is the
+// OpenAI-compatible shape. A provider that authenticates differently needs a change
+// in the script, not a different flag. The secret that authenticates it is resolved
+// by the caller and passed as Config.ModelKey; this package never reads a vault.
 type Provider struct {
 	// Name is a label used in logs. Empty means "model".
 	Name string

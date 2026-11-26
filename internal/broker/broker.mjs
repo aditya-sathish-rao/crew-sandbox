@@ -8,6 +8,18 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 
+// A rejection nobody handled has always terminated this process by default; make it
+// explicit so the log says why. It matters more here than in most services: every
+// GitHub token this broker minted lives only in its memory, so a death that the log
+// does not explain is a death that strands credentials. Individual routes still
+// contain their own failures - this is the backstop for the ones that do not.
+process.on("unhandledRejection", (reason) => {
+  console.error(
+    `crew-broker: unhandled rejection, exiting: ${reason?.stack ?? reason}`,
+  );
+  process.exit(1);
+});
+
 const env = process.env;
 const port = Number(env.CREW_BROKER_PORT ?? 3129);
 const appId = env.CREW_APP_ID;
@@ -192,6 +204,14 @@ const readJson = (request) =>
     });
   });
 
+// A task id is a label, not free text. It is used as the map key and interpolated
+// into every log line this broker writes, so a newline in it would forge a log record
+// and an unbounded one is a memory bound an agent controls. The allowlist is the
+// narrow set that appears in a task id and never needs escaping.
+const taskIdPattern = /^[A-Za-z0-9._-]{1,128}$/;
+const validTask = (task) =>
+  typeof task === "string" && taskIdPattern.test(task);
+
 const reply = (response, status, payload) => {
   response.writeHead(status, { "content-type": "application/json" });
   response.end(payload === undefined ? "" : JSON.stringify(payload));
@@ -216,6 +236,13 @@ const server = http.createServer(async (request, response) => {
     const { task, repo } = body;
     if (!task || !repo) {
       reply(response, 400, { error: "task and repo are required" });
+      return;
+    }
+    if (!validTask(task)) {
+      console.error("DENY task=<invalid>");
+      reply(response, 400, {
+        error: "task must match [A-Za-z0-9._-]{1,128}",
+      });
       return;
     }
     if (!repos.includes(repo)) {
@@ -250,15 +277,32 @@ const server = http.createServer(async (request, response) => {
   const revokeRoute = /^\/token\/(.+)$/.exec(route.pathname);
   if (request.method === "DELETE" && revokeRoute) {
     const task = decodeURIComponent(revokeRoute[1]);
+    if (!validTask(task)) {
+      console.error("DENY task=<invalid>");
+      reply(response, 400, { error: "task must match [A-Za-z0-9._-]{1,128}" });
+      return;
+    }
     const held = issued.get(task);
     if (!held) {
       reply(response, 404, { error: `no token for ${task}` });
       return;
     }
     issued.delete(task);
-    const revoked = await revoke(held.token);
-    console.error(`REVOKE task=${task} repo=${held.repo} revoked=${revoked}`);
-    reply(response, 204);
+    // Revoking is a network call, so it can fail. Un-guarded, the rejection escaped
+    // the handler and an unhandled rejection terminates the process - taking every
+    // other in-memory token with it, unreachable and therefore unrevokable. The
+    // token is already out of the map, so all that is left is to report it; the
+    // /revoke-all path below takes the same view.
+    try {
+      const revoked = await revoke(held.token);
+      console.error(`REVOKE task=${task} repo=${held.repo} revoked=${revoked}`);
+      reply(response, 204);
+    } catch (error) {
+      console.error(
+        `REVOKE task=${task} repo=${held.repo} failed: ${error.message}`,
+      );
+      reply(response, 502, { error: error.message });
+    }
     return;
   }
 
