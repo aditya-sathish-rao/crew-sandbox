@@ -57,7 +57,7 @@ Concretely, the boundary is four things:
 | `nix/guest/`     | The guest's home-manager configuration, exported as `homeManagerModules`.       |
 | `verify/gates/`  | One script per invariant in [SECURITY.md](SECURITY.md), run by `check`.         |
 | `verify/redteam/`| Adversarial simulations that try to break those invariants.                     |
-| `examples/`      | Minimal consumer flakes showing how to import this repo.                        |
+| `examples/`      | A minimal consumer flake, evaluated by `checks.examples`.                       |
 
 Every directory carries a short `README.md` stating its boundary: what runs there, and
 what must not.
@@ -71,8 +71,10 @@ what must not.
 ```
 
 The flake exposes `packages.default` (the CLI), `checks.unit` (the Go unit tests),
-`checks.guest` (the guest configuration, evaluated), `checks.darwin` (the host module,
-evaluated), `homeManagerModules.default` (the guest configuration),
+`checks.selftest` (both `--selftest` runs plus the guest configuration, evaluated),
+`checks.darwin` (the host module, evaluated), `checks.examples` (the example consumer,
+evaluated), `checks.formatting` (prettier on the two `.mjs` files),
+`homeManagerModules.default` (the guest configuration),
 `darwinModules.default` (the host configuration), and `devShells.default`/`formatter`.
 
 The guest configuration names no tools of its own. Pass the fleet as `extraPackages`, and
@@ -358,8 +360,9 @@ into CI, and a self-hosted runner is not worth it yet, for three reasons:
 
 `nix flake check` and the operator binary build *are* wired into CI:
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `nix build .#crew-sandbox` and
-`nix flake check` on an arm64 macOS runner — unit tests, both selftests, prettier, and the
-guest-configuration evaluation, with no VM and no network. The gates above are not.
+`nix flake check` on an arm64 macOS runner — unit tests, both selftests, prettier, the
+guest-configuration evaluation and the example consumer, with no VM and no network. The
+gates above are not.
 
 A self-hosted runner on a spare Mac is the only way to run the gates in CI. It becomes worth
 arguing for when someone other than the operator needs the result — and it would mean that

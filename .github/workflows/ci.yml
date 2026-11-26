@@ -3,7 +3,7 @@ name: ci
 # Only what a build can prove with no VM and no network: the Go unit tests
 # (including `node --check` and `bash -n` on every embedded script), both
 # `--selftest` runs, prettier, an evaluation of the exported guest configuration,
-# and the operator binary itself.
+# an evaluation of the example consumer, and the operator binary itself.
 #
 # The phase gates are deliberately not here. They assert on this operator's guest,
 # with this operator's secrets, and `vmType: vz` cannot nest inside a hosted macOS
@@ -50,6 +50,7 @@ jobs:
           nix build --no-link -L \
             .#checks.aarch64-linux.unit \
             .#checks.aarch64-linux.selftest \
+            .#checks.aarch64-linux.examples \
             .#checks.aarch64-linux.formatting
 
   darwin:
@@ -66,3 +67,5 @@ jobs:
         run: nix build .#crew-sandbox --no-link -L
       - name: evaluate the darwin module
         run: nix build --no-link -L .#checks.aarch64-darwin.darwin
+      - name: evaluate the example consumer
+        run: nix build --no-link -L .#checks.aarch64-darwin.examples

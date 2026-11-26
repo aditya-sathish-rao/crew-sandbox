@@ -70,6 +70,20 @@
           crew-sandbox = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
         };
 
+        # The example consumer is the template for the cutover, so it is evaluated
+        # rather than trusted: a renamed option fails here instead of in someone's
+        # dotfiles.
+        examples = import ./nix/checks/examples.nix {
+          inherit
+            pkgs
+            nixpkgs
+            home-manager
+            nix-darwin
+            ;
+          lib = pkgs.lib;
+          crew-sandbox = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+        };
+
         formatting = pkgs.runCommand "crew-sandbox-formatting" { nativeBuildInputs = [ pkgs.prettier ]; } ''
           export HOME=$TMPDIR
           prettier --check --no-cache \

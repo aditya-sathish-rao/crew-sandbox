@@ -140,10 +140,18 @@ Scaffolding and most of the core are done. This plan changes three things from y
 [x] Note that the broker authenticates no caller and its port is only closed to the guest
 6. Darwin module, last
 [x] Test whether a launchd daemon can read the vault key non-interactively (av refuses with "human approval required")
-[ ] Choose between a system daemon, a user agent for the proxy, or a broker the CLI starts on demand
-[ ] Write nix/modules/darwin.nix with services.crew-sandbox.enable
+[x] Choose between a system daemon, a user agent for the proxy, or a broker the CLI starts on demand — a user agent; the comparison and the measurement are in [darwin-authority-shape.md](darwin-authority-shape.md)
+[x] Write nix/modules/darwin.nix with services.crew-sandbox.enable
 7. Cutover to agentic-dev-env
-[ ] Tag v0.1.0 and add the flake input pinned to that tag
+[x] Tag v0.1.0 (this repository)
+[x] Ship the consumer template: `examples/consumer/` is a standalone flake that imports both halves, and `checks.examples` evaluates it so a renamed option fails here rather than in the dotfiles
+[ ] Add the flake input pinned to that tag (agentic-dev-env)
 [ ] Run the old repo's gates against the new package and compare assertion counts
 [ ] Consume the package and guest config from the flake input
 [ ] Delete nix/crew-sandbox/ from agentic-dev-env
+
+The three unchecked items all land in `agentic-dev-env`, not here: they change that
+repository's flake inputs and delete its copy of the code. This repository's side of the
+cutover is the tag and the template, and both exist. `examples/consumer/` is the file to
+copy: replace the fleet in `home.nix` and the provider and App ID in `darwin.nix`, and
+the rest of the wiring is already correct.
