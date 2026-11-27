@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/aditya-sathish-rao/crew-sandbox/internal/allowlist"
 )
@@ -50,8 +51,12 @@ type Config struct {
 	// ModelKey is the upstream model API key. Empty disables the model gateway,
 	// which is the safe default: a proxy without a key still enforces egress.
 	ModelKey string
-	// ModelToken is the guest's model token. Empty disables the model gateway.
-	ModelToken string
+	// ModelToken is the client's token: what a client presents to the gateway.
+	// Empty disables the model gateway. ModelTokens holds any additional tokens,
+	// for a machine that runs the fleet in a guest and also as a dedicated macOS
+	// account: one gateway serves both, and each client has its own token.
+	ModelToken  string
+	ModelTokens []string
 	// Port is the listen port for the CONNECT and plain-HTTP egress proxy. Zero
 	// means 3128.
 	Port int
@@ -136,6 +141,11 @@ func Command(ctx context.Context, cfg Config) (*Process, error) {
 
 	cmd := exec.CommandContext(ctx, node, args...)
 	cmd.Env = append(os.Environ(), "CREW_MODEL_TOKEN="+cfg.ModelToken)
+	if len(cfg.ModelTokens) > 0 {
+		// The script reads the first token from CREW_MODEL_TOKEN and the rest from
+		// CREW_MODEL_TOKENS, newline-separated. A single-token start is unchanged.
+		cmd.Env = append(cmd.Env, "CREW_MODEL_TOKENS="+strings.Join(cfg.ModelTokens, "\n"))
+	}
 	if cfg.ModelKey != "" {
 		// The script reads the key from a fixed variable so the Go layer can pass
 		// it without the script knowing which provider it belongs to. The name is

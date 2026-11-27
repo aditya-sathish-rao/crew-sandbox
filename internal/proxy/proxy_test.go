@@ -238,3 +238,57 @@ func status(t *testing.T, url, token string) int {
 	defer response.Body.Close()
 	return response.StatusCode
 }
+
+// A machine that runs the fleet in a guest and also as a dedicated macOS account
+// has two clients and one gateway. Both tokens must be accepted, and each must
+// keep its own rate budget: a shared budget would let one client starve the other.
+func TestGatewayAcceptsEveryConfiguredToken(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node is not on PATH")
+	}
+
+	upstream := httptest.NewTLSServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("content-type", "application/json")
+			_, _ = io.WriteString(w, `{"data":[{"id":"m"}]}`)
+		}),
+	)
+	defer upstream.Close()
+
+	egressPort, modelPort := freePortPair(t)
+	p, err := Command(context.Background(), Config{
+		Provider:    Provider{Name: "test", Upstream: upstream.URL},
+		ModelKey:    "secret",
+		ModelToken:  "host-token",
+		ModelTokens: []string{"guest-token"},
+		Port:        egressPort,
+		ModelPort:   modelPort,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Cleanup()
+
+	var stderr bytes.Buffer
+	p.Cmd.Stderr = &stderr
+	p.Cmd.Env = append(p.Cmd.Env, "NODE_TLS_REJECT_UNAUTHORIZED=0")
+	if err := p.Cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = p.Cmd.Process.Kill()
+		_ = p.Cmd.Wait()
+	}()
+
+	modelBase := fmt.Sprintf("http://127.0.0.1:%d/model", modelPort)
+	waitForListener(t, modelBase+"/models")
+
+	for _, token := range []string{"host-token", "guest-token"} {
+		if code := status(t, modelBase+"/models", token); code != http.StatusOK {
+			t.Fatalf("model route with token %q = %d, want 200\n%s", token, code, stderr.String())
+		}
+	}
+	if code := status(t, modelBase+"/models", "neither"); code != http.StatusUnauthorized {
+		t.Fatalf("model route with an unknown token = %d, want 401", code)
+	}
+}

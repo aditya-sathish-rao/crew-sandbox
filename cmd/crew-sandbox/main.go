@@ -572,11 +572,11 @@ func cmdProxy(ctx context.Context, args []string) error {
 	// what the gateway presents upstream. They are independent, and the token is
 	// never the key.
 	//
-	// With no VM in the picture - a standard macOS user running the fleet on the
-	// host - there is no guest to read the token from, so the operator names a file
-	// they own. A file the operator explicitly named is a configuration error when
-	// it cannot be read, unlike a guest that is simply not running: fail rather than
-	// start a gateway that silently refuses every request.
+	// There can be two clients on one gateway. A machine that runs the fleet in a
+	// guest and also as a dedicated macOS account has a token in each place, and
+	// both must be accepted. The guest's token is read from the guest; the host
+	// account's comes from a file the operator owns, named by --model-token-file.
+	// Either source alone is a complete configuration.
 	if *modelTokenFile != "" {
 		token, err := os.ReadFile(*modelTokenFile)
 		if err != nil {
@@ -586,17 +586,21 @@ func cmdProxy(ctx context.Context, args []string) error {
 		if cfg.ModelToken == "" {
 			return fmt.Errorf("model token file %s is empty", *modelTokenFile)
 		}
-	} else {
-		// The token lives in the guest. Reading it here keeps it out of the host's
-		// environment and out of the binary's configuration.
-		g, err := f.guest()
-		if err != nil {
-			return err
-		}
-		// The token is 0644 by design, so the agent account can read it without
-		// sudo; Run already drops to agent, and a nested `sudo -n` would fail there.
-		if token, err := g.Run([]string{"cat", "/etc/crew-model-token"}, ""); err == nil {
-			cfg.ModelToken = strings.TrimSpace(token)
+	}
+
+	// The guest's token lives in the guest. Reading it here keeps it out of the
+	// host's environment and out of the binary's configuration. A guest that is not
+	// running is not an error: a host-only fleet has no guest at all.
+	g, err := f.guest()
+	if err != nil {
+		return err
+	}
+	// The token is 0644 by design, so the agent account can read it without sudo;
+	// Run already drops to agent, and a nested `sudo -n` would fail there.
+	if token, err := g.Run([]string{"cat", "/etc/crew-model-token"}, ""); err == nil {
+		token = strings.TrimSpace(token)
+		if token != "" && token != cfg.ModelToken {
+			cfg.ModelTokens = append(cfg.ModelTokens, token)
 		}
 	}
 

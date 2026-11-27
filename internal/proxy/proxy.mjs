@@ -38,14 +38,26 @@ if (!allowFile && !selftest) {
   process.exit(2);
 }
 
-// The model key and the guest's token are independent: the key comes from the
-// vault when the proxy starts, the token is created inside the VM. Without both,
-// the gateway is disabled rather than open. The key variable is provider-neutral:
-// the Go layer resolves whatever secret the operator configured and passes it
-// here, so this script never names a vendor.
+// The model key and the client's token are independent: the key comes from the
+// vault when the proxy starts, the token is what a client presents to the gateway.
+// Without both, the gateway is disabled rather than open. The key variable is
+// provider-neutral: the Go layer resolves whatever secret the operator configured
+// and passes it here, so this script never names a vendor.
+//
+// There can be more than one token. A machine that runs the fleet in a guest and
+// also as a dedicated macOS account has two clients, each with its own token, and
+// one gateway serves both: the guest's token is created inside the VM, the host
+// account's comes from a file the operator owns. CREW_MODEL_TOKEN holds the first
+// and CREW_MODEL_TOKENS the rest, newline-separated, so a single-token start is
+// unchanged.
 const modelKey = process.env.CREW_MODEL_KEY;
-const modelToken = process.env.CREW_MODEL_TOKEN;
-const modelReady = Boolean(modelKey && modelToken && modelUpstream);
+const modelTokens = [
+  process.env.CREW_MODEL_TOKEN,
+  ...(process.env.CREW_MODEL_TOKENS ?? "").split("\n"),
+]
+  .map((token) => token.trim())
+  .filter(Boolean);
+const modelReady = Boolean(modelKey && modelTokens.length > 0 && modelUpstream);
 if (keyHashOut) {
   const hash = modelKey
     ? crypto.createHash("sha256").update(modelKey).digest("hex")
@@ -280,18 +292,21 @@ const isModelRequest = (url) =>
   url.startsWith(`${modelPrefix}/`) ||
   url.startsWith(`${modelPrefix}?`);
 
-const tokenMatches = (header) => {
-  if (
-    !modelToken ||
-    typeof header !== "string" ||
-    !header.startsWith("Bearer ")
-  )
-    return false;
+// tokenMatches reports which token the request presented, or null. The caller
+// needs the token itself, not just a yes: the rate limit is per token, so two
+// clients on one gateway must not share a budget.
+const matchedToken = (header) => {
+  if (typeof header !== "string" || !header.startsWith("Bearer ")) return null;
   const given = Buffer.from(header.slice("Bearer ".length));
-  const expected = Buffer.from(modelToken);
-  return (
-    given.length === expected.length && crypto.timingSafeEqual(given, expected)
-  );
+  for (const token of modelTokens) {
+    const expected = Buffer.from(token);
+    if (
+      given.length === expected.length &&
+      crypto.timingSafeEqual(given, expected)
+    )
+      return token;
+  }
+  return null;
 };
 
 const replyJson = (response, status, payload) => {
@@ -336,12 +351,13 @@ const handleModel = (request, response) => {
     replyJson(response, 503, { error: "model gateway is disabled" });
     return;
   }
-  if (!tokenMatches(request.headers.authorization)) {
+  const token = matchedToken(request.headers.authorization);
+  if (!token) {
     log("DENY", `model-auth ${label}`, from);
     replyJson(response, 401, { error: "unauthorized" });
     return;
   }
-  if (overRateLimit(modelToken)) {
+  if (overRateLimit(token)) {
     log("DENY", `model-rate ${label}`, from);
     response.writeHead(429, {
       "content-type": "application/json",
