@@ -53,7 +53,8 @@ let
   ++ lib.optionals (cfg.proxy.allowFile != null) [
     "--egress-allow"
     (toString cfg.proxy.allowFile)
-  ];
+  ]
+  ++ cfg.proxy.extraArgs;
 
   brokerArgs = [
     "--app-id"
@@ -197,6 +198,21 @@ in
           Hostname allowlist. Null uses the example compiled into the binary, so
           a module that names nothing still enforces a boundary rather than
           removing one.
+        '';
+      };
+
+      extraArgs = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [
+          "--model-token-file"
+          "/etc/crew-sandbox/model-token"
+        ];
+        description = ''
+          Extra flags for `crew-sandbox proxy`. `--model-token-file` belongs here
+          when the fleet runs on the host rather than in a guest: with no guest to
+          read `/etc/crew-model-token` from, the token comes from a file the
+          operator owns.
         '';
       };
     };

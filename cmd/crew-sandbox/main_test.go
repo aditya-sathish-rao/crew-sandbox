@@ -378,3 +378,74 @@ exit 0
 		t.Fatalf("attach did not start the stopped instance: %s", logged)
 	}
 }
+
+// fakeProxyNode puts a `node` on PATH that records the environment it was given and
+// exits, so the proxy's token plumbing is observable without starting a listener.
+func fakeProxyNode(t *testing.T) (envPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	envPath = filepath.Join(dir, "env.log")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$CREW_MODEL_TOKEN\" > \"$FM_FAKE_ENV_LOG\"\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "node"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FM_FAKE_ENV_LOG", envPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return envPath
+}
+
+func TestProxyReadsTheModelTokenFromAFile(t *testing.T) {
+	// A fleet that runs on the host has no guest to read /etc/crew-model-token from,
+	// so the operator names a file they own. The token has to reach the gateway
+	// process, or every request is refused with 401.
+	envPath := fakeProxyNode(t)
+	tokenFile := filepath.Join(t.TempDir(), "model-token")
+	if err := os.WriteFile(tokenFile, []byte("host-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := run([]string{"proxy", "--model-token-file", tokenFile}); err != nil {
+		t.Fatalf("proxy: %v", err)
+	}
+	logged, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(logged)); got != "host-token" {
+		t.Fatalf("CREW_MODEL_TOKEN = %q, want %q", got, "host-token")
+	}
+}
+
+func TestProxyRefusesAnUnreadableModelTokenFile(t *testing.T) {
+	// A named file that cannot be read is a configuration error, not a guest that
+	// happens to be down: starting anyway would serve a gateway that refuses every
+	// request while reporting healthy.
+	fakeProxyNode(t)
+	missing := filepath.Join(t.TempDir(), "absent")
+
+	err := run([]string{"proxy", "--model-token-file", missing})
+	if err == nil {
+		t.Fatal("proxy started with an unreadable model token file")
+	}
+	if !strings.Contains(err.Error(), "model token file") {
+		t.Fatalf("error does not name the token file: %v", err)
+	}
+}
+
+func TestProxyRefusesAnEmptyModelTokenFile(t *testing.T) {
+	// An empty file is the same failure as a missing one: the gateway would come up
+	// with no token to compare against.
+	fakeProxyNode(t)
+	empty := filepath.Join(t.TempDir(), "empty")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := run([]string{"proxy", "--model-token-file", empty})
+	if err == nil {
+		t.Fatal("proxy started with an empty model token file")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("error does not say the file is empty: %v", err)
+	}
+}

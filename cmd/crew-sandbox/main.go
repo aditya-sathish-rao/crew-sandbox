@@ -57,6 +57,7 @@ proxy flags:
   --model-upstream URL   model provider base URL; empty disables the gateway
   --model-key-env NAME   vault secret holding the model key (default: CREW_MODEL_KEY)
   --model-port PORT      model gateway listen port (default: 3130)
+  --model-token-file FILE  read the model token from FILE instead of the guest
   --egress-allow FILE    hostname allowlist; empty uses the embedded example
 
 broker flags:
@@ -103,6 +104,13 @@ OpenAI-compatible surface only - GET /models and POST /chat/completions, with
 Authorization: Bearer, over https - so a provider that authenticates differently
 needs a change here, not just a flag. With no upstream the gateway is disabled and
 egress enforcement still runs.
+
+The model token is what a client presents to the gateway. By default it is read
+from /etc/crew-model-token inside the guest, which is the VM boundary's shape.
+--model-token-file names a host file instead, for a fleet that runs on the host
+with no guest to read from; the file must be readable by the account the proxy
+runs as, and an unreadable or empty file stops the proxy rather than starting a
+gateway that refuses every request.
 `
 
 // exitError carries a child process's exit status up to main.
@@ -518,6 +526,7 @@ func cmdProxy(ctx context.Context, args []string) error {
 	keyHashOut := fs.String("key-hash-out", "", "write the model key's SHA-256 to this file, for the model gate")
 	modelPort := fs.Int("model-port", 0, "model gateway listen port (default 3130)")
 	egressAllow := fs.String("egress-allow", "", "hostname allowlist file; empty uses the embedded example")
+	modelTokenFile := fs.String("model-token-file", "", "read the model token from this file instead of the guest")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -559,16 +568,36 @@ func cmdProxy(ctx context.Context, args []string) error {
 		cfg.ModelKey = key
 	}
 
-	// The model token lives in the guest. Reading it here keeps it out of the
-	// host's environment and out of the binary's configuration.
-	g, err := f.guest()
-	if err != nil {
-		return err
-	}
-	// The token is 0644 by design, so the agent account can read it without sudo;
-	// Run already drops to agent, and a nested `sudo -n` would fail there.
-	if token, err := g.Run([]string{"cat", "/etc/crew-model-token"}, ""); err == nil {
-		cfg.ModelToken = strings.TrimSpace(token)
+	// The model token is what the client presents to the gateway; the model key is
+	// what the gateway presents upstream. They are independent, and the token is
+	// never the key.
+	//
+	// With no VM in the picture - a standard macOS user running the fleet on the
+	// host - there is no guest to read the token from, so the operator names a file
+	// they own. A file the operator explicitly named is a configuration error when
+	// it cannot be read, unlike a guest that is simply not running: fail rather than
+	// start a gateway that silently refuses every request.
+	if *modelTokenFile != "" {
+		token, err := os.ReadFile(*modelTokenFile)
+		if err != nil {
+			return fmt.Errorf("model token file: %w", err)
+		}
+		cfg.ModelToken = strings.TrimSpace(string(token))
+		if cfg.ModelToken == "" {
+			return fmt.Errorf("model token file %s is empty", *modelTokenFile)
+		}
+	} else {
+		// The token lives in the guest. Reading it here keeps it out of the host's
+		// environment and out of the binary's configuration.
+		g, err := f.guest()
+		if err != nil {
+			return err
+		}
+		// The token is 0644 by design, so the agent account can read it without
+		// sudo; Run already drops to agent, and a nested `sudo -n` would fail there.
+		if token, err := g.Run([]string{"cat", "/etc/crew-model-token"}, ""); err == nil {
+			cfg.ModelToken = strings.TrimSpace(token)
+		}
 	}
 
 	p, err := proxy.Command(ctx, cfg)

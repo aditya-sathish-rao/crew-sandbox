@@ -52,6 +52,10 @@ let
       appID = "123";
       port = 3129;
     };
+    proxy.extraArgs = [
+      "--model-token-file"
+      "/etc/crew-sandbox/model-token"
+    ];
   };
 
   disabled = mkHost {
@@ -104,6 +108,11 @@ let
     "the proxy listens on the configured ports" =
       lib.hasInfix "--port 3128" (joined proxyArgs)
       && lib.hasInfix "--model-port 3130" (joined proxyArgs);
+
+    # A fleet that runs on the host has no guest to read the token from, so the
+    # operator's file has to reach the proxy as a flag.
+    "the proxy reads the token from the operator's file" =
+      lib.hasInfix "--model-token-file /etc/crew-sandbox/model-token" (joined proxyArgs);
 
     # The App ID is public configuration, so it is a flag rather than a secret.
     "the broker names its app id" = lib.hasInfix "--app-id 123" (joined brokerArgs);

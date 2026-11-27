@@ -121,6 +121,19 @@ explicit — a Mac that reboots unattended has no egress proxy until someone log
 and [`docs/darwin-authority-shape.md`](docs/darwin-authority-shape.md) for the comparison
 against a system daemon and against starting the services on demand.
 
+The gateway's token is what a client presents to it; the model key is what the gateway
+presents upstream. By default the token is read from `/etc/crew-model-token` inside the
+guest, which is the VM boundary's shape. A fleet that runs on the host has no guest to
+read from, so `--model-token-file` names a host file instead:
+
+```nix
+services.crew-sandbox.proxy.extraArgs = [ "--model-token-file" "/etc/crew-sandbox/model-token" ];
+```
+
+The file must be readable by the account the proxy runs as. An unreadable or empty file
+stops the proxy rather than starting a gateway that refuses every request while
+reporting healthy.
+
 ### Attaching to the guest
 
 `run` forces `--tty=false`, because its output is data an orchestrator reads. That makes
