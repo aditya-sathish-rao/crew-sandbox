@@ -32,6 +32,7 @@ import (
 const usage = `usage: crew-sandbox <command> [flags] [-- args]
 
   run      start the guest if needed and run a command inside it
+  attach   open an interactive session in the guest as the agent account
   up       create the guest if missing and start it
   down     stop the guest and revoke the broker's tokens
   destroy  delete the guest and its disk
@@ -46,6 +47,10 @@ run flags:
                     execution (see the note after this list)
   --name NAME       Lima instance name (default: crew-sandbox)
   --workdir DIR     directory inside the guest to run in
+
+attach flags:
+  --name NAME       Lima instance name (default: crew-sandbox)
+  --workdir DIR     directory inside the guest to start in (default: the agent's home)
 
 proxy flags:
   --model-provider NAME  provider label used in logs (default: model)
@@ -79,6 +84,11 @@ The guest sees nothing of the host unless --workspace is given. That is the
 boundary: a workspace mount is the one deliberate exception, and it is read-only
 unless --writable is passed. Commands run as the unprivileged agent account, never
 as the Lima admin account.
+
+attach is the interactive counterpart to run. run forces --tty=false because its
+output is data, so it cannot carry a full-screen program; attach allocates a pty
+and lands in a login shell as the agent account, in the agent's home. Pass a
+command after -- to run it instead of a shell: crew-sandbox attach -- herdr.
 
 A workspace is refused if it is, contains, or is inside the home directory, ~/.ssh,
 ~/.aws, Lima's instance store, or /. Symlinks are resolved before that check, so a
@@ -133,6 +143,8 @@ func run(args []string) error {
 	switch command {
 	case "run":
 		return cmdRun(ctx, rest)
+	case "attach":
+		return cmdAttach(ctx, rest)
 	case "up":
 		return cmdUp(ctx, rest)
 	case "down":
@@ -310,6 +322,38 @@ func cmdRun(ctx context.Context, args []string) error {
 	// Untrusted work runs as the unprivileged agent account; lima.Run applies that
 	// wrapper itself, so there is no way for a call site to forget it.
 	err = g.RunIO(ctx, argv, f.workdir, os.Stdin, os.Stdout, os.Stderr)
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitError{code: exitErr.ExitCode()}
+	}
+	return err
+}
+
+// cmdAttach opens an interactive session in the guest as the unprivileged agent
+// account. It is the only way to reach a full-screen program in the guest: run
+// forces --tty=false, so it cannot carry one.
+//
+// It takes --name and --workdir only. --workspace and --writable are deliberately
+// absent: attach runs no command against a mount, and accepting the flags would
+// suggest a mount could be added to an instance that already exists.
+func cmdAttach(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
+	var f guestFlags
+	fs.StringVar(&f.name, "name", "crew-sandbox", "Lima instance name")
+	fs.StringVar(&f.workdir, "workdir", "", "directory inside the guest to start in")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	argv := fs.Args()
+
+	g := lima.Guest{Name: f.name}
+	// StartForAttach, not Start: attach runs nothing against a mount, so an instance
+	// created with a workspace must still be attachable.
+	if err := g.StartForAttach(); err != nil {
+		return err
+	}
+
+	err := g.Attach(ctx, argv, f.workdir, os.Stdin, os.Stdout, os.Stderr)
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		return exitError{code: exitErr.ExitCode()}

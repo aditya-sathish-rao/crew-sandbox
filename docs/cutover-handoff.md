@@ -235,12 +235,12 @@ This needs a running guest and vault approvals. Expect prompts.
 These are real differences between the old CLI and the new one. Decide each explicitly;
 do not let them pass silently.
 
-### 4.1 The new CLI has no `kill`, `ruleset`, `shell`, or `apply`
+### 4.1 The new CLI has no `kill`, `ruleset`, or `apply`
 
 | Old command | New equivalent | Status |
 | --- | --- | --- |
 | `kill` | `down` — stops the guest, **then** revokes broker tokens | Covered, renamed |
-| `shell` | `run -- <cmd>` | No interactive shell; `run` requires a command |
+| `shell` | `attach` — an interactive `ssh -tt` session as `agent` | Covered, renamed |
 | `ruleset <repo>` | none | **Missing.** The ruleset JSON ships at `verify/gates/broker-ruleset.json` but nothing applies it |
 | `apply` | none | Deliberate — see README "Applying it to the guest" |
 
@@ -248,6 +248,13 @@ do not let them pass silently.
 `kill` did. But `ruleset` has no replacement, and the branch ruleset is the human-merge
 backstop the whole broker design leans on. Either apply it by hand with `gh api`, or add
 the command to `crew-sandbox`.
+
+`shell` → `attach` is not a straight rename, so read the difference before relying on it.
+`run` forces `--tty=false` because its output is data, so it cannot carry a full-screen
+program; `attach` goes to `ssh` directly with `-tt` and lands in a login shell as `agent`.
+It takes `--name` and `--workdir` only — `--workspace` and `--writable` are absent, because
+attach runs nothing against a mount. It starts a stopped guest, and it skips `run`'s mount
+check for the same reason: an instance created with a workspace must stay attachable.
 
 ### 4.2 The instance name changed
 

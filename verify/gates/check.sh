@@ -265,6 +265,26 @@ probe_run_as_agent() {
   fi
 }
 
+# probe_attach_as_agent <label>: the interactive entry point, end to end.
+#
+# attach is the only way to reach a full-screen program in the guest, and it is the
+# one entry point where getting the account wrong would hand a root shell to whoever
+# is at the keyboard. It goes to ssh rather than limactl, so probe_run_as_agent's
+# check does not cover it.
+probe_attach_as_agent() {
+  local label=$1 who
+  if ! who=$("$self" attach --name "$name" -- id -un 2>&1); then
+    flunk "$label (crew-sandbox attach failed: ${who})"
+    return
+  fi
+  who=$(printf '%s' "$who" | tr -d '[:space:]')
+  if [[ "$who" == "agent" ]]; then
+    pass "$label"
+  else
+    flunk "$label (the session ran as '${who}', not 'agent')"
+  fi
+}
+
 # probe_no_forward <bind-address> <label>: start a listener inside the guest as
 # `agent` and require the host's loopback to stay empty.
 #
@@ -378,6 +398,7 @@ phase_guest() {
   # And the entry point itself runs what it is given as `agent`, not as the
   # administration account every other gate wraps its own command around.
   probe_run_as_agent "crew-sandbox run executes the command as agent, not as the Lima user"
+  probe_attach_as_agent "crew-sandbox attach opens the session as agent, not as the Lima user"
   [[ "$fail" -eq 0 ]] || rc=1
   return "$rc"
 }

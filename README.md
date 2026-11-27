@@ -50,7 +50,7 @@ Concretely, the boundary is four things:
 
 | Path             | What belongs there                                                              |
 | ---------------- | ------------------------------------------------------------------------------- |
-| `cmd/`           | The operator CLI: `crew-sandbox run --workspace <path> -- <command>`.           |
+| `cmd/`           | The operator CLI: `crew-sandbox run --workspace <path> -- <command>`, and `attach`. |
 | `internal/`      | Implementation packages the CLI drives: VM lifecycle, proxy, broker.            |
 | `nix/modules/`   | The nix-darwin host module: the proxy and broker as launchd user agents.        |
 | `nix/packages/`  | The host package set the CLI and the darwin module depend on.                   |
@@ -121,6 +121,24 @@ explicit — a Mac that reboots unattended has no egress proxy until someone log
 and [`docs/darwin-authority-shape.md`](docs/darwin-authority-shape.md) for the comparison
 against a system daemon and against starting the services on demand.
 
+### Attaching to the guest
+
+`run` forces `--tty=false`, because its output is data an orchestrator reads. That makes
+it the wrong tool for anything full-screen. `attach` is the interactive counterpart: it
+allocates a pty and lands in a login shell as `agent`, in the agent's home.
+
+```console
+$ crew-sandbox attach                    # a login shell as agent
+$ crew-sandbox attach -- herdr           # run a full-screen program instead
+$ crew-sandbox attach --workdir /tmp -- ls
+```
+
+It starts a stopped guest, and it does not apply `run`'s mount check: attach runs nothing
+against a mount, so an instance created with a workspace stays attachable. The ssh login
+is the Lima user, because that is the account Lima installs the instance key for; the
+session becomes `agent` through the same `sudo -n -u agent -H --` wrapper `run` uses, so
+attaching never hands out the administration account.
+
 ### Applying it to the guest
 
 The module is exported, not installed. The guest has no host mount, so the consumer
@@ -129,9 +147,8 @@ A login shell already carries the proxy, so flake inputs are fetched through the
 allowlisted door. For example, with the consumer's flake published at `OWNER/REPO`:
 
 ```console
-$ limactl shell crew-sandbox -- sudo -n -u agent -H bash -lc \
-    'nix run github:nix-community/home-manager/release-26.05 -- \
-       switch --flake github:OWNER/REPO#agent@aarch64-linux'
+$ crew-sandbox attach -- nix run github:nix-community/home-manager/release-26.05 -- \
+    switch --flake github:OWNER/REPO#agent@aarch64-linux
 ```
 
 A local checkout can be copied in with `limactl copy -r` and referenced by path instead.

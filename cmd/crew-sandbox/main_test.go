@@ -245,3 +245,136 @@ func TestWorkspaceMountUsesTheResolvedPath(t *testing.T) {
 		t.Fatalf("run with a symlinked workspace: %v", err)
 	}
 }
+
+// fakeSSH puts an ssh on PATH that records its argv, so the attach command's
+// contract is observable without a VM.
+func fakeSSH(t *testing.T) (logPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	logPath = filepath.Join(dir, "ssh.log")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FM_FAKE_SSH_LOG\"\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FM_FAKE_SSH_LOG", logPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+// fakeLimaHome creates the instance directory and the ssh config Lima writes, so
+// attach's existence check passes.
+func fakeLimaHome(t *testing.T, name string) {
+	t.Helper()
+	home := t.TempDir()
+	dir := filepath.Join(home, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := "Host lima-" + name + "\n  User crew\n  Hostname 127.0.0.1\n  Port 60022\n"
+	if err := os.WriteFile(filepath.Join(dir, "ssh.config"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LIMA_HOME", home)
+}
+
+func TestAttachOpensAPtyAsTheAgentUser(t *testing.T) {
+	// run forces --tty=false, so it cannot carry a full-screen program. attach is the
+	// only way in, and it has to land as the unprivileged account rather than the
+	// Lima admin account.
+	fakeLimactl(t, "")
+	fakeLimaHome(t, "crew-sandbox")
+	logPath := fakeSSH(t)
+
+	if err := run([]string{"attach"}); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := strings.TrimSpace(string(logged))
+	for _, want := range []string{"-tt", "lima-crew-sandbox", "sudo -n -u agent -H --"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("ssh argv is missing %q: %s", want, line)
+		}
+	}
+}
+
+func TestAttachPassesTheCommandThrough(t *testing.T) {
+	// `attach -- herdr` is the documented way to reach a full-screen program in the
+	// guest, so the command has to survive into the remote script.
+	fakeLimactl(t, "")
+	fakeLimaHome(t, "crew-sandbox")
+	logPath := fakeSSH(t)
+
+	if err := run([]string{"attach", "--", "herdr", "--remote", "x"}); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logged), "herdr --remote x") {
+		t.Fatalf("the command did not reach the guest: %s", logged)
+	}
+}
+
+func TestAttachReturnsTheSessionExitStatus(t *testing.T) {
+	// A script that runs `crew-sandbox attach -- cmd` has to see cmd's status, the
+	// same way it would from run.
+	fakeLimactl(t, "")
+	fakeLimaHome(t, "crew-sandbox")
+	dir := t.TempDir()
+	script := "#!/bin/sh\nexit 5\n"
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := run([]string{"attach"})
+	var exit exitError
+	if !errors.As(err, &exit) {
+		t.Fatalf("attach did not return an exit status: %v", err)
+	}
+	if exit.code != 5 {
+		t.Fatalf("exit code = %d, want 5", exit.code)
+	}
+}
+
+func TestAttachStartsAStoppedInstance(t *testing.T) {
+	// Attach is the only way into the VM, so it must not require a separate `up`
+	// first. It also must not apply run's mount check: attach runs nothing against a
+	// mount, and an instance created with a workspace has to stay attachable.
+	fakeLimaHome(t, "crew-sandbox")
+	fakeSSH(t)
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "argv.log")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$FM_FAKE_LOG"
+case "$1" in
+  list)
+    case "$3" in
+      --json) printf '%s\n' '{"config":{"mounts":[{"location":"/tmp/repo","mountPoint":"/tmp/repo","writable":true}]}}' ;;
+      *) printf '%s\n' "Stopped" ;;
+    esac
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "limactl"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FM_FAKE_LOG", logPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := run([]string{"attach"}); err != nil {
+		t.Fatalf("attach on a stopped instance with a mount: %v", err)
+	}
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logged), "start --tty=false crew-sandbox") {
+		t.Fatalf("attach did not start the stopped instance: %s", logged)
+	}
+}

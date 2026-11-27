@@ -70,6 +70,8 @@ type Guest struct {
 	Mounts []Mount
 	// Limactl is the binary to invoke. Empty means "limactl" from PATH.
 	Limactl string
+	// SSH is the ssh client Attach invokes. Empty means "ssh" from PATH.
+	SSH string
 }
 
 // Mount is one host directory exposed to the guest. Writable is false unless the
@@ -134,6 +136,21 @@ var ErrMountsNotApplied = errors.New("mounts cannot be added to an existing inst
 // requested mount is fine: the second and later runs of the same workspace must
 // work, not fail.
 func (g Guest) Start() error {
+	return g.start(true)
+}
+
+// StartForAttach starts the instance if it is stopped, without the mount check
+// Start applies.
+//
+// Attach runs no command against a mount: it is the operator's own interactive
+// session, not untrusted work. An instance created with a workspace must still be
+// attachable, and refusing to start it because this run asked for no mount would
+// make the one way into the VM depend on how the VM happened to be created.
+func (g Guest) StartForAttach() error {
+	return g.start(false)
+}
+
+func (g Guest) start(validateMounts bool) error {
 	status, err := g.Status()
 	if err != nil {
 		return err
@@ -142,15 +159,17 @@ func (g Guest) Start() error {
 		return g.create()
 	}
 
-	applied, err := g.appliedMounts()
-	if err != nil {
-		return err
-	}
-	if !mountsSatisfied(g.Mounts, applied) {
-		return fmt.Errorf(
-			"%w: %s was created with [%s] and this run asked for [%s]; destroy it and start it again",
-			ErrMountsNotApplied, g.Name, describeMounts(applied), describeMounts(g.Mounts),
-		)
+	if validateMounts {
+		applied, err := g.appliedMounts()
+		if err != nil {
+			return err
+		}
+		if !mountsSatisfied(g.Mounts, applied) {
+			return fmt.Errorf(
+				"%w: %s was created with [%s] and this run asked for [%s]; destroy it and start it again",
+				ErrMountsNotApplied, g.Name, describeMounts(applied), describeMounts(g.Mounts),
+			)
+		}
 	}
 	if status == StatusRunning {
 		return nil
@@ -380,6 +399,150 @@ func (g Guest) RunIO(ctx context.Context, argv []string, workdir string, stdin i
 		// No captured stderr: it went to the caller's stream. Wrap rather than
 		// format so errors.As can still recover the guest command's exit status.
 		return fmt.Errorf("limactl shell: %w", err)
+	}
+	return nil
+}
+
+// sshHost is the Host alias Lima writes into the instance's ssh.config. Lima
+// derives it from the instance name by prefixing "lima-" and replacing dots and
+// underscores with dashes, so the alias is not simply "lima-" + Name.
+func (g Guest) sshHost() string {
+	name := strings.ReplaceAll(g.Name, ".", "-")
+	name = strings.ReplaceAll(name, "_", "-")
+	return "lima-" + name
+}
+
+// sshConfigPath is the ssh config Lima writes for the instance. Lima documents it
+// as a file that can be passed to `ssh -F`, which is what Attach does: it carries
+// the identity file, the host key policy and the forwarded port, so none of that
+// has to be re-derived here and none of it can drift from what Lima started.
+func (g Guest) sshConfigPath() (string, error) {
+	store := os.Getenv("LIMA_HOME")
+	if store == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		store = filepath.Join(home, ".lima")
+	}
+	return filepath.Join(store, g.Name, "ssh.config"), nil
+}
+
+// shellQuote renders s as a single word for a POSIX shell. The remote command is
+// one string that the guest's login shell parses, so every argument in it has to
+// survive that parse unchanged.
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	safe := true
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("-_./:=@+,", r):
+		default:
+			safe = false
+		}
+		if !safe {
+			break
+		}
+	}
+	if safe {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// shellJoin quotes each word and joins them, producing one string a shell parses
+// back into the same argv.
+func shellJoin(argv []string) string {
+	quoted := make([]string, len(argv))
+	for i, arg := range argv {
+		quoted[i] = shellQuote(arg)
+	}
+	return strings.Join(quoted, " ")
+}
+
+// attachScript is the command the guest runs once ssh has a pty: a login shell as
+// AgentUser, in AgentUser's home, running argv if one was given.
+//
+// The `cd` is not decoration. The ssh session starts in the Lima user's home, which
+// AgentUser cannot read, so a shell that inherited that directory would start in a
+// place it has no permission to be.
+//
+// The command goes through `bash -lc` rather than being exec'd directly, because the
+// guest's tools come from its own login profile: PATH, the proxy variables and the
+// Nix profile are all set there. `attach -- herdr` has to resolve herdr the same way
+// the operator would if they had typed it in the guest, and a direct exec would not.
+func attachScript(argv []string, workdir string) string {
+	dir := `"$HOME"`
+	if workdir != "" {
+		dir = shellQuote(workdir)
+	}
+	script := "cd " + dir + " && exec bash -l"
+	if len(argv) > 0 {
+		script = "cd " + dir + " && exec bash -lc " + shellQuote(shellJoin(argv))
+	}
+	return script
+}
+
+// Attach opens an interactive session in the guest as the unprivileged AgentUser.
+//
+// This is the only way to reach the guest's own terminal: Run and RunIO force
+// --tty=false because they are for commands whose output is data, so neither can
+// carry a full-screen program. Attach goes to ssh directly, with -tt to allocate a
+// pty, and lands in a login shell as AgentUser.
+//
+// The ssh login itself is the Lima user, because that is the account Lima installs
+// the instance key for; the session becomes AgentUser through the same sudo wrapper
+// Run and RunIO use. Attaching as the administration account would put the operator
+// one `sudo` from root for no benefit, and would make the boundary depend on which
+// command the operator happened to run.
+//
+// argv is optional. With none, the operator gets a shell; with some, the shell runs
+// them, which is how `attach -- herdr` reaches a full-screen program in the guest.
+// workdir is where the session starts; empty means AgentUser's home.
+func (g Guest) Attach(ctx context.Context, argv []string, workdir string, stdin io.Reader, stdout, stderr io.Writer) error {
+	config, err := g.sshConfigPath()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(config); err != nil {
+		return fmt.Errorf("attach: %s: %w; start the guest first", config, err)
+	}
+
+	remote := shellJoin(asAgent([]string{"bash", "-c", attachScript(argv, workdir)}))
+	args := []string{
+		"-F", config,
+		// -tt, not -t: -t only asks for a pty when the local side has one, and the
+		// point of attach is that the guest always gets one.
+		"-tt",
+		// Lima's own choice, for the same reason: without it ssh prints "Shared
+		// connection to ... closed" over the session on exit.
+		"-o", "LogLevel=ERROR",
+		"--", g.sshHost(),
+		remote,
+	}
+
+	ssh := g.SSH
+	if ssh == "" {
+		ssh = "ssh"
+	}
+	cmd := exec.CommandContext(ctx, ssh, args...)
+	cmd.Stdin = stdin
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.Cancel = func() error {
+		// Same grace as RunIO: an interactive session gets a chance to exit cleanly
+		// rather than being killed the instant the context is cancelled.
+		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		return nil
+	}
+	cmd.WaitDelay = 10 * time.Second
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ssh: %w", err)
 	}
 	return nil
 }
