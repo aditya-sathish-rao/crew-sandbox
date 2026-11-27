@@ -217,7 +217,7 @@ const reply = (response, status, payload) => {
   response.end(payload === undefined ? "" : JSON.stringify(payload));
 };
 
-const server = http.createServer(async (request, response) => {
+const handle = async (request, response) => {
   const route = new URL(request.url, "http://broker");
 
   if (request.method === "GET" && route.pathname === "/health") {
@@ -344,6 +344,31 @@ const server = http.createServer(async (request, response) => {
   }
 
   reply(response, 404, { error: "not found" });
+};
+
+// Every route above guards its own network calls, but the handler itself can still
+// throw: a malformed request URL, a malformed percent-escape in a revoke path, or a
+// write to a socket the client already closed. An async handler's rejection is
+// unhandled, and an unhandled rejection terminates the process - taking every
+// in-memory token with it, unreachable and therefore unrevokable. So the whole
+// handler is wrapped: one bad request must cost one response, never the broker.
+const server = http.createServer(async (request, response) => {
+  try {
+    await handle(request, response);
+  } catch (error) {
+    console.error(`crew-broker: request failed: ${error?.stack ?? error}`);
+    // The response may already be half-written, in which case writeHead throws
+    // again; the client sees a dropped connection either way.
+    try {
+      if (!response.headersSent) {
+        reply(response, 500, { error: "internal error" });
+      } else {
+        response.destroy();
+      }
+    } catch {
+      response.destroy();
+    }
+  }
 });
 
 if (process.argv.includes("--selftest")) {
