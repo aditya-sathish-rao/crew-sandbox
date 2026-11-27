@@ -590,17 +590,20 @@ func cmdProxy(ctx context.Context, args []string) error {
 
 	// The guest's token lives in the guest. Reading it here keeps it out of the
 	// host's environment and out of the binary's configuration. A guest that is not
-	// running is not an error: a host-only fleet has no guest at all.
-	g, err := f.guest()
-	if err != nil {
-		return err
-	}
-	// The token is 0644 by design, so the agent account can read it without sudo;
-	// Run already drops to agent, and a nested `sudo -n` would fail there.
-	if token, err := g.Run([]string{"cat", "/etc/crew-model-token"}, ""); err == nil {
-		token = strings.TrimSpace(token)
-		if token != "" && token != cfg.ModelToken {
-			cfg.ModelTokens = append(cfg.ModelTokens, token)
+	// running is not an error: a host-only fleet has no guest at all, and a machine
+	// that runs the fleet as a dedicated macOS account may never have created one.
+	//
+	// A guest that is running but has no token yet is also not an error: the token
+	// is created inside the VM, so a proxy started before the guest's first boot
+	// would otherwise refuse to start and never come back.
+	if g, err := f.guest(); err == nil {
+		// The token is 0644 by design, so the agent account can read it without
+		// sudo; Run already drops to agent, and a nested `sudo -n` would fail there.
+		if token, err := g.Run([]string{"cat", "/etc/crew-model-token"}, ""); err == nil {
+			token = strings.TrimSpace(token)
+			if token != "" && token != cfg.ModelToken {
+				cfg.ModelTokens = append(cfg.ModelTokens, token)
+			}
 		}
 	}
 
