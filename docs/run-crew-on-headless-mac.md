@@ -31,6 +31,24 @@ Open
 • FileVault: automatic sign-in after a reboot requires it off (see Phase 0). Decide once the mini holds no personal data.
 • Whether agents run simulator tests or only compile and run unit tests, which sizes the macOS lane.
 • Which client you operate from once the laptop arrives. The plan assumes ssh plus herdr from any client.
+Three modes, and the one this plan takes
+The crew stack — herdr, the first mate, the crewmates and the worktree pool — is placed as a unit. Firstmate does not place an individual worker on a remote machine, so there is no mode where a worker runs somewhere its first mate does not. The three modes are three places the whole stack can live, and they differ only in where the boundary is.
+
+| | Laptop, your account | Mini, `crew` account | Mini, Lima VM |
+| --- | --- | --- | --- |
+| Stack lives in | your account | a `crew` account | the guest, as `agent` |
+| Boundary | none | macOS user permissions — secrets, not source | VM, firewall, proxy |
+| Apple builds | yes | yes, unsigned | no |
+| Model key | `av inject` | gateway, from `crew`’s vault | gateway, from the host’s vault |
+| Attach | local | `ssh crew@mini` | `crew-sandbox attach` |
+
+What each boundary actually stops:
+• Laptop: nothing. The stack runs as you, with your files, your gh token and an open network. This is today.
+• Mini, `crew` account: a new local account lands in `staff` (gid 20), and your home is `0750` owner:staff, so `crew` can traverse it and read `~/projects` (0755) and its git history. It cannot read `~/.ssh` (0700), `~/.lima` (0700), `~/.config/gh/*.yml` (0600) or `~/.pi/agent/auth.json` and `models-store.json` (0600). The boundary is your secrets, not your source. `av` is per-user, so the proxy and broker run as `crew` and need a vault `crew` can read — and on a mini that boots unattended, nobody is there to answer the prompt. Apple builds work, unsigned; `xcode-select --switch` needs an admin once.
+• Mini, Lima VM: the guest kernel, nftables and the proxy. No Apple builds, because Linux cannot run Xcode, the simulator or code signing. Attach is `crew-sandbox attach`, which ssh’s as the guest’s Lima user and drops to `agent` through `sudo -n -u agent -H --`; `agent` has no ssh key and no sshd entry of its own. Note the name collision: the Lima user inside the guest is also called `crew`, and it is the administration account, not the unprivileged one.
+
+The third mode is the one this plan takes. The first two are recorded because they are the fallbacks if the VM proves impractical on 16 GB, and because the `crew` account is the only one of the three that can build for Apple platforms.
+
 Target design
 Host (the mini, headless): owns the vault, the egress proxy and allowlist, the token broker, the repository that holds the pins, and the Lima VM. Nothing the agents touch lives in the host user’s home directory.
 Guest (Lima, Linux): herdr server and panes, first mate, crewmates, the worktree pool, and the same Nix pins as the host. Agents run as a dedicated non-sudo user. The guest has no mounts from the host.
